@@ -161,7 +161,7 @@ class EntailmentLlama(EntailmentLLM):
         return prompt
 
     def predict(self, prompt, temperature):
-        predicted_answer, _, _ = self.model.predict(prompt, temperature)
+        predicted_answer, _, _, _ = self.model.predict(prompt, temperature)
         return predicted_answer
 
 

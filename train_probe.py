@@ -7,10 +7,12 @@ Modes:
 
 Usage:
     python train_probe.py --mode id --dataset squad
+    python train_probe.py --mode id --dataset squad --save_probe
     python train_probe.py --mode ood --train_dataset squad --eval_dataset trivia_qa
     python train_probe.py --mode matrix
 """
 import os
+import pickle
 import torch
 import argparse
 import numpy as np
@@ -34,6 +36,12 @@ def parse_args():
                         help="Training dataset for OOD mode")
     parser.add_argument("--eval_dataset", type=str, default=None,
                         help="Evaluation dataset for OOD mode")
+    parser.add_argument("--feature_type", choices=["hidden", "lookback"], default="hidden",
+                        help="'hidden' = TBG/SLT per-layer embeddings (default); "
+                             "'lookback' = Lookback Lens attention-head ratio features")
+    parser.add_argument("--save_probe", action="store_true",
+                        help="Save the trained TBG+SLT probes to output/{dataset}/sep_probe_*.pkl "
+                             "(used by inference_with_gate.py). Only applies in ID mode.")
     return parser.parse_args()
 
 
@@ -115,6 +123,33 @@ def load_dataset_features(dataset_name):
                  f"low={np.sum(y==0)}, high={np.sum(y==1)}")
 
     return X_tbg, X_slt, y, threshold, entropy
+
+
+def load_lookback_features(dataset_name):
+    """Load pre-computed lookback ratio features and binarize labels.
+
+    Returns:
+        X_lb   : np.ndarray  (N, num_layers * num_heads)  — flattened per-head ratios
+        y      : np.ndarray  (N,)                          — binarized SE labels
+        threshold : float
+        entropy   : torch.Tensor (N,)
+    """
+    data_file = os.path.join(OUTPUT_BASE, dataset_name, "lookback_features.pt")
+    logging.info(f"Loading {data_file} ...")
+    data    = torch.load(data_file, weights_only=False)
+
+    X_lb    = data['X_lookback']   # (N, num_layers * num_heads)
+    entropy = data['entropy']       # (N,)
+
+    threshold = best_split(entropy)
+    y = (entropy >= threshold).long().numpy()
+
+    logging.info(f"  {dataset_name}: {X_lb.shape[0]} samples, "
+                 f"{X_lb.shape[1]} lookback features, "
+                 f"threshold={threshold:.4f}, "
+                 f"low={np.sum(y==0)}, high={np.sum(y==1)}")
+
+    return X_lb.numpy(), y, threshold, entropy
 
 
 # ============================================================
@@ -213,7 +248,7 @@ def train_concat_probe_ood(X_train_np, y_train, X_eval_np, y_eval, r_start, r_en
 # Mode: In-Distribution
 # ============================================================
 
-def main_id(dataset_name):
+def main_id(dataset_name, save_probe=False):
     """Full ID evaluation for a single dataset."""
     X_tbg, X_slt, y, threshold, entropy = load_dataset_features(dataset_name)
     num_samples, num_layers, hidden_dim = X_tbg.shape
@@ -279,6 +314,35 @@ def main_id(dataset_name):
         print(classification_report(r['y_test'], r['y_pred'],
                                     target_names=["Low SE", "High SE"]))
     print("=" * 60)
+
+    # ---- Optional: save probes for use in inference_with_gate.py ----
+    if save_probe:
+        X_tbg_np = X_tbg.numpy().transpose(1, 0, 2)  # (num_layers, N, hidden_dim)
+        X_slt_np = X_slt.numpy().transpose(1, 0, 2)
+
+        for tn, X_np in [("TBG", X_tbg_np), ("SLT", X_slt_np)]:
+            r_start, r_end = results[tn]['range']
+            # Retrain on FULL dataset (no train/test split) for use at inference
+            X_full = np.concatenate([X_np[l] for l in range(r_start, r_end)], axis=1)
+            clf_full = LogisticRegression(max_iter=1000)
+            clf_full.fit(X_full, y)
+
+            probe_bundle = {
+                'clf':          clf_full,
+                'r_start':      r_start,
+                'r_end':        r_end,
+                'threshold':    threshold,   # SE binarization threshold
+                'token_type':   tn,
+                'dataset':      dataset_name,
+                'hidden_dim':   X_tbg.shape[2],
+                'num_layers':   X_tbg.shape[1],
+            }
+            probe_path = os.path.join(OUTPUT_BASE, dataset_name, f"sep_probe_{tn}.pkl")
+            with open(probe_path, "wb") as f:
+                pickle.dump(probe_bundle, f)
+            logging.info(f"Saved {tn} probe → {probe_path}  "
+                         f"(layers [{r_start},{r_end}), "
+                         f"SE threshold={threshold:.4f})")
 
     return results
 
@@ -464,17 +528,164 @@ def main_matrix():
 
 
 # ============================================================
+# Lookback Lens probe (Chuang et al., EMNLP 2024)
+# Features are already flat (num_layers * num_heads) — no layer sweep needed.
+# ============================================================
+
+def main_lookback_id(dataset_name):
+    """In-distribution evaluation using Lookback Ratio features."""
+    X_lb, y, threshold, entropy = load_lookback_features(dataset_name)
+
+    X_trainval, X_test, y_trainval, y_test = train_test_split(
+        X_lb, y, test_size=0.1, random_state=42)
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_trainval, y_trainval, test_size=0.2, random_state=42)
+
+    clf = LogisticRegression(max_iter=1000)
+    clf.fit(X_train, y_train)
+
+    val_auroc  = roc_auc_score(y_val,  clf.predict_proba(X_val)[:, 1])
+    y_pred     = clf.predict(X_test)
+    test_auroc = roc_auc_score(y_test, clf.predict_proba(X_test)[:, 1])
+    test_acc   = accuracy_score(y_test, y_pred)
+
+    print(f"\n{'='*60}")
+    print(f"LOOKBACK LENS RESULTS — {dataset_name} (In-Distribution)")
+    print(f"{'='*60}")
+    print(f"Model:        {MODEL_NAME}")
+    print(f"NLI Model:    {NLI_MODEL}")
+    print(f"SE threshold: {threshold:.4f} (best_split)")
+    print(f"Samples:      {len(y)}")
+    print(f"Class dist:   low={np.sum(y==0)}, high={np.sum(y==1)}")
+    print(f"Feature dim:  {X_lb.shape[1]}  (num_layers × num_heads)")
+    print()
+    print(f"  Val AUROC:     {val_auroc:.4f}")
+    print(f"  Test AUROC:    {test_auroc:.4f}")
+    print(f"  Test Accuracy: {test_acc:.4f}")
+    print()
+    print(f"Classification Report:")
+    print(classification_report(y_test, y_pred, target_names=["Low SE", "High SE"]))
+    print("=" * 60)
+
+
+def main_lookback_ood(train_dataset, eval_dataset):
+    """OOD evaluation using Lookback Ratio features."""
+    logging.info(f"Lookback OOD: train={train_dataset}, eval={eval_dataset}")
+
+    X_train, y_train, thresh_train, _ = load_lookback_features(train_dataset)
+    X_eval,  y_eval,  thresh_eval,  _ = load_lookback_features(eval_dataset)
+
+    clf = LogisticRegression(max_iter=1000)
+    clf.fit(X_train, y_train)
+
+    y_pred     = clf.predict(X_eval)
+    eval_auroc = roc_auc_score(y_eval, clf.predict_proba(X_eval)[:, 1])
+    eval_acc   = accuracy_score(y_eval, y_pred)
+
+    print(f"\n{'='*60}")
+    print(f"LOOKBACK LENS OOD — Train: {train_dataset} -> Eval: {eval_dataset}")
+    print(f"{'='*60}")
+    print(f"Train threshold: {thresh_train:.4f}  |  Eval threshold: {thresh_eval:.4f}")
+    print(f"Train: {len(y_train)} samples  |  Eval: {len(y_eval)} samples")
+    print(f"  Eval AUROC:  {eval_auroc:.4f}")
+    print(f"  Eval Acc:    {eval_acc:.4f}")
+    print("=" * 60)
+
+
+def main_lookback_matrix():
+    """Full 4×4 cross-dataset AUROC matrix using Lookback Ratio features."""
+    available = []
+    for ds in QA_DATASETS:
+        data_file = os.path.join(OUTPUT_BASE, ds, "lookback_features.pt")
+        if os.path.exists(data_file):
+            available.append(ds)
+        else:
+            logging.warning(f"Skipping {ds}: {data_file} not found")
+
+    if len(available) < 2:
+        logging.error(f"Need ≥2 datasets. Found: {available}")
+        return
+
+    all_data = {}
+    for ds in available:
+        X, y, threshold, entropy = load_lookback_features(ds)
+        all_data[ds] = {'X': X, 'y': y, 'threshold': threshold}
+
+    auroc_matrix = np.zeros((len(available), len(available)))
+    for i, train_ds in enumerate(available):
+        X_train = all_data[train_ds]['X']
+        y_train = all_data[train_ds]['y']
+        for j, eval_ds in enumerate(available):
+            X_eval = all_data[eval_ds]['X']
+            y_eval = all_data[eval_ds]['y']
+            if train_ds == eval_ds:
+                X_tv, X_te, y_tv, y_te = train_test_split(X_train, y_train,
+                                                            test_size=0.1, random_state=42)
+                X_tr, _, y_tr, _ = train_test_split(X_tv, y_tv, test_size=0.2, random_state=42)
+                clf = LogisticRegression(max_iter=1000)
+                clf.fit(X_tr, y_tr)
+                auroc_matrix[i][j] = roc_auc_score(y_te, clf.predict_proba(X_te)[:, 1])
+            else:
+                clf = LogisticRegression(max_iter=1000)
+                clf.fit(X_train, y_train)
+                auroc_matrix[i][j] = roc_auc_score(y_eval, clf.predict_proba(X_eval)[:, 1])
+            logging.info(f"  {train_ds:>12} -> {eval_ds:<12}: "
+                         f"AUROC={auroc_matrix[i][j]:.4f}")
+
+    print(f"\n{'='*70}")
+    print("LOOKBACK LENS — CROSS-DATASET AUROC MATRIX")
+    print(f"{'='*70}")
+    _lb_label = "Train \\ Eval"
+    header = f"{_lb_label:>14}"
+    for ds in available:
+        header += f"  {ds:>12}"
+    print(header)
+    print("-" * len(header))
+    for i, train_ds in enumerate(available):
+        row = f"{train_ds:>14}"
+        for j, eval_ds in enumerate(available):
+            marker = " *" if train_ds == eval_ds else "  "
+            row += f"  {auroc_matrix[i][j]:>10.4f}{marker}"
+        print(row)
+
+    diag     = np.diag(auroc_matrix)
+    off_diag = auroc_matrix[~np.eye(len(available), dtype=bool)]
+    print(f"\n  ID mean AUROC:  {np.mean(diag):.4f}")
+    print(f"  OOD mean AUROC: {np.mean(off_diag):.4f}")
+    print(f"  OOD/ID ratio:   {np.mean(off_diag)/np.mean(diag):.4f}")
+    print(f"\n  (* = in-distribution)")
+    print(f"{'='*70}")
+
+
+# ============================================================
 # Main dispatch
 # ============================================================
 
 def main():
     args = parse_args()
 
+    if args.feature_type == "lookback":
+        # ---- Lookback Lens probe ----
+        if args.mode == "id":
+            if args.dataset is None:
+                logging.error("--dataset required for ID mode")
+                return
+            main_lookback_id(args.dataset)
+        elif args.mode == "ood":
+            if args.train_dataset is None or args.eval_dataset is None:
+                logging.error("--train_dataset and --eval_dataset required for OOD mode")
+                return
+            main_lookback_ood(args.train_dataset, args.eval_dataset)
+        elif args.mode == "matrix":
+            main_lookback_matrix()
+        return
+
+    # ---- Hidden-state (TBG / SLT) probe — original behaviour ----
     if args.mode == "id":
         if args.dataset is None:
             logging.error("--dataset required for ID mode")
             return
-        main_id(args.dataset)
+        main_id(args.dataset, save_probe=args.save_probe)
 
     elif args.mode == "ood":
         if args.train_dataset is None or args.eval_dataset is None:

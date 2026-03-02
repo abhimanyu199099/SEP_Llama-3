@@ -221,7 +221,7 @@ def model_based_metric(predicted_answer, example, model):
     if 'gpt' in model.model_name.lower():
         predicted_answer = model.predict(prompt, 0.01)
     else:
-        predicted_answer, _, _ = model.predict(prompt, 0.01)
+        predicted_answer, _, _, _ = model.predict(prompt, 0.01)
 
     if 'yes' in predicted_answer.lower():
         return 1.0

@@ -1,0 +1,4 @@
+usage: compute_nli_labels.py [-h] --dataset {squad,trivia_qa,nq,bioasq}
+                             [--condition_on_question | --no-condition_on_question]
+                             [--strict_entailment | --no-strict_entailment]
+compute_nli_labels.py: error: argument --dataset: invalid choice: 'xsum' (choose from 'squad', 'trivia_qa', 'nq', 'bioasq')

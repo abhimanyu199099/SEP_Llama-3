@@ -1,0 +1,22 @@
+2026-03-02 03:19:40,113 - INFO - Loading output/xsum/all_layers.pt...
+Traceback (most recent call last):
+  File "/home/anish/yaawar/LLM/semantic-entropy-probes/train_probe.py", line 701, in <module>
+    main()
+  File "/home/anish/yaawar/LLM/semantic-entropy-probes/train_probe.py", line 688, in main
+    main_id(args.dataset, save_probe=args.save_probe)
+  File "/home/anish/yaawar/LLM/semantic-entropy-probes/train_probe.py", line 253, in main_id
+    X_tbg, X_slt, y, threshold, entropy = load_dataset_features(dataset_name)
+                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anish/yaawar/LLM/semantic-entropy-probes/train_probe.py", line 110, in load_dataset_features
+    data = torch.load(data_file, weights_only=False)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anish/miniconda3/envs/se_probes/lib/python3.11/site-packages/torch/serialization.py", line 986, in load
+    with _open_file_like(f, 'rb') as opened_file:
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anish/miniconda3/envs/se_probes/lib/python3.11/site-packages/torch/serialization.py", line 435, in _open_file_like
+    return _open_file(name_or_buffer, mode)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anish/miniconda3/envs/se_probes/lib/python3.11/site-packages/torch/serialization.py", line 416, in __init__
+    super().__init__(open(name, mode))
+                     ^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'output/xsum/all_layers.pt'

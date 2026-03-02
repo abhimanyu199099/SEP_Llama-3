@@ -1,0 +1,2 @@
+2026-03-02 03:28:31,193 - INFO - Dataset: xsum  |  max_new_tokens: 100  |  metric: ROUGE-L >= 0.2  |  gate_mode: soft  |  lr_cutoff: 0.5
+2026-03-02 03:28:31,193 - ERROR - sep_probe_TBG.pkl not found at output/xsum/sep_probe_TBG.pkl. Run run_qa_generation.py and train_probe.py --save_probe first.

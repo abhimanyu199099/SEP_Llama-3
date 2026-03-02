@@ -231,7 +231,7 @@ class HuggingfaceModel(BaseModel):
         self.token_limit = 4096 if 'Llama-2' in model_name else 2048
 
     
-    def predict(self, input_data, temperature, return_full=False, return_latent=False, formatted=True):
+    def predict(self, input_data, temperature, return_full=False, return_latent=False, return_attention=False, formatted=True):
 
         if not formatted:
             input_data = self.tokenizer.apply_chat_template(...)
@@ -266,6 +266,7 @@ class HuggingfaceModel(BaseModel):
                 return_dict_in_generate=True,
                 output_scores=True,
                 output_hidden_states=True,
+                output_attentions=return_attention,
                 temperature=temperature,
                 do_sample=True,
                 stopping_criteria=stopping_criteria,
@@ -390,7 +391,44 @@ class HuggingfaceModel(BaseModel):
         else:
             hidden_states += (None, None)
 
-        return_values = (sliced_answer, log_likelihoods, hidden_states)
+        # ------------------------------------------------------------------ #
+        # Lookback Ratio (Chuang et al., EMNLP 2024 "Lookback Lens")        #
+        #                                                                     #
+        # For each attention head (layer l, head h) and generated token t:  #
+        #   LookbackRatio[l,h,t] = sum(attn to context) / sum(attn to all)  #
+        #                                                                     #
+        # Final feature = mean over T generated tokens.                      #
+        # Shape returned: (num_layers, num_heads)                            #
+        # ------------------------------------------------------------------ #
+        lookback_ratio = None
+        if return_attention and outputs.attentions is not None:
+            n_input_token_lb = inputs['input_ids'].shape[1]
+            # outputs.attentions: tuple[T] of tuple[L] of Tensor(B, H, q, kv)
+            # T = number of generation steps, L = num_layers
+            num_layers_attn = len(outputs.attentions[0])
+            num_heads_attn  = outputs.attentions[0][0].shape[1]
+            # Accumulate lookback ratios: (num_layers, num_heads)
+            lookback_sum = torch.zeros(num_layers_attn, num_heads_attn)
+            valid_steps = 0
+            for step_idx, step_attentions in enumerate(outputs.attentions):
+                # Only count up to n_generated steps
+                if step_idx >= n_generated:
+                    break
+                layer_ratios = []
+                for layer_attn in step_attentions:
+                    # layer_attn: (batch=1, num_heads, q_len, kv_len)
+                    # Step 0 has q_len = full sequence; step > 0 has q_len = 1 (KV cache)
+                    attn = layer_attn[0]          # (num_heads, q_len, kv_len)
+                    attn_row = attn[:, -1, :]     # last query = current generated token: (heads, kv_len)
+                    context_sum = attn_row[:, :n_input_token_lb].sum(-1)   # (heads,)
+                    total_sum   = attn_row.sum(-1).clamp(min=1e-10)        # (heads,)
+                    layer_ratios.append((context_sum / total_sum).cpu())   # (heads,)
+                lookback_sum += torch.stack(layer_ratios)  # (num_layers, num_heads)
+                valid_steps += 1
+            if valid_steps > 0:
+                lookback_ratio = lookback_sum / valid_steps  # (num_layers, num_heads)
+
+        return_values = (sliced_answer, log_likelihoods, hidden_states, lookback_ratio)
 
         return return_values
 

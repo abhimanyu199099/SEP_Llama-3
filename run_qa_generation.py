@@ -1,11 +1,12 @@
-"""QA Generation for Semantic Entropy Probes.
+"""Generation for Semantic Entropy Probes.
 
-Generates answers on QA datasets (SQuAD, TriviaQA, NQ, BioASQ) using
-OATML paper parameters for Llama-2-7B short-form.
+Generates answers on QA datasets (SQuAD, TriviaQA, NQ, BioASQ) and
+summaries on XSum using Llama-2-7B.
 
 Usage:
     python run_qa_generation.py --dataset squad
     python run_qa_generation.py --dataset trivia_qa
+    python run_qa_generation.py --dataset xsum
 """
 import os
 import sys
@@ -27,7 +28,9 @@ from common_utils import (
     MODEL_NAME, NUM_SAMPLES_QA, NUM_GENERATIONS_QA,
     TEMPERATURE_HIGH, TEMPERATURE_LOW, NUM_FEW_SHOT,
     MAX_NEW_TOKENS, SEED_QA, BRIEF_PROMPT, USE_CONTEXT,
-    QA_DATASETS, OUTPUT_BASE,
+    ALL_DATASETS, XSUM_DATASETS, OUTPUT_BASE,
+    XSUM_MAX_NEW_TOKENS, XSUM_NUM_GENERATIONS, XSUM_NUM_FEW_SHOT,
+    XSUM_NUM_SAMPLES, XSUM_BRIEF_PROMPT,
 )
 
 
@@ -38,11 +41,11 @@ logging.basicConfig(
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="QA Generation for SEP")
-    parser.add_argument("--dataset", required=True, choices=QA_DATASETS,
-                        help="QA dataset to generate on")
-    parser.add_argument("--num_samples", type=int, default=NUM_SAMPLES_QA,
-                        help="Number of validation samples to generate on")
+    parser = argparse.ArgumentParser(description="Generation for SEP (QA + XSum)")
+    parser.add_argument("--dataset", required=True, choices=ALL_DATASETS,
+                        help="Dataset to generate on (QA or summarization)")
+    parser.add_argument("--num_samples", type=int, default=None,
+                        help="Number of validation samples (default: 2000 QA, 1000 XSum)")
     return parser.parse_args()
 
 
@@ -84,6 +87,23 @@ def build_test_input(question, context=None, use_context=False):
     return prompt
 
 
+def build_few_shot_prompt_xsum(dataset, example_indices, brief):
+    """Build few-shot prompt for XSum summarization."""
+    prompt = brief
+    for idx in example_indices:
+        example = dataset[idx]
+        document = example["context"]
+        summary = example["answers"]["text"][0]
+        prompt += f"Article: {document}\n"
+        prompt += f"Summary: {summary}\n\n"
+    return prompt
+
+
+def build_test_input_xsum(context):
+    """Build the test input for XSum: Article + Summary prefix."""
+    return f"Article: {context}\nSummary:"
+
+
 def compute_f1(prediction, ground_truth):
     """Token-level F1 between prediction and ground truth."""
     pred_tokens = prediction.lower().split()
@@ -111,7 +131,13 @@ def compute_accuracy(prediction, example):
 def main():
     args = parse_args()
     dataset_name = args.dataset
-    num_samples = args.num_samples
+    is_xsum = dataset_name in XSUM_DATASETS
+
+    # Dataset-dependent defaults
+    num_samples    = args.num_samples or (XSUM_NUM_SAMPLES if is_xsum else NUM_SAMPLES_QA)
+    num_few_shot   = XSUM_NUM_FEW_SHOT if is_xsum else NUM_FEW_SHOT
+    num_generations = XSUM_NUM_GENERATIONS if is_xsum else NUM_GENERATIONS_QA
+    max_new_tokens = XSUM_MAX_NEW_TOKENS if is_xsum else MAX_NEW_TOKENS
 
     # Reproducibility
     random.seed(SEED_QA)
@@ -143,8 +169,11 @@ def main():
         answerable_train, _ = get_answerable_indices(train_ds)
 
     # Select few-shot examples from answerable training set
-    prompt_indices = random.sample(answerable_train, min(NUM_FEW_SHOT, len(answerable_train)))
-    few_shot_prompt = build_few_shot_prompt(train_ds, prompt_indices, BRIEF_PROMPT, USE_CONTEXT)
+    prompt_indices = random.sample(answerable_train, min(num_few_shot, len(answerable_train)))
+    if is_xsum:
+        few_shot_prompt = build_few_shot_prompt_xsum(train_ds, prompt_indices, XSUM_BRIEF_PROMPT)
+    else:
+        few_shot_prompt = build_few_shot_prompt(train_ds, prompt_indices, BRIEF_PROMPT, USE_CONTEXT)
 
     logging.info(f"Few-shot prompt ({len(prompt_indices)} examples):")
     logging.info(few_shot_prompt[:500] + "...")
@@ -162,14 +191,14 @@ def main():
     model = HuggingfaceModel(
         model_name=MODEL_NAME,
         stop_sequences='default',
-        max_new_tokens=MAX_NEW_TOKENS,
+        max_new_tokens=max_new_tokens,
     )
 
     # Generation loop
     data_store = []
     accuracies = []
     logging.info(f"Starting generation: {actual_samples} samples x "
-                 f"{NUM_GENERATIONS_QA} high-temp + 1 low-temp...")
+                 f"{num_generations} high-temp + 1 low-temp...")
 
     for i, idx in tqdm(enumerate(indices), total=actual_samples):
         if (i + 1) % 10 == 0:
@@ -181,12 +210,15 @@ def main():
         context = example.get("context", None)
         example_id = example.get("id", str(idx))
 
-        test_input = build_test_input(question, context, USE_CONTEXT)
+        if is_xsum:
+            test_input = build_test_input_xsum(context)
+        else:
+            test_input = build_test_input(question, context, USE_CONTEXT)
         local_prompt = few_shot_prompt + test_input
 
         # --- High-temp generations for SE computation ---
         generations = []
-        for gen_i in range(NUM_GENERATIONS_QA):
+        for gen_i in range(num_generations):
             try:
                 answer, _, _, _ = model.predict(local_prompt, temperature=TEMPERATURE_HIGH)
                 generations.append(answer)

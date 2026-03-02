@@ -635,7 +635,8 @@ def main_lookback_matrix():
     print(f"\n{'='*70}")
     print("LOOKBACK LENS — CROSS-DATASET AUROC MATRIX")
     print(f"{'='*70}")
-    header = f"{'Train \\ Eval':>14}"
+    _lb_label = "Train \\ Eval"
+    header = f"{_lb_label:>14}"
     for ds in available:
         header += f"  {ds:>12}"
     print(header)

@@ -1,19 +1,22 @@
 #!/bin/bash
-# SEP QA Pipeline — Runs all 4 datasets through generation, NLI, extraction, and probe training.
+# SEP Pipeline — Supports QA datasets (squad, trivia_qa, nq, bioasq) and XSum.
+#
+# XSum is the recommended dataset for the Lookback Gate experiment because
+# its long-form outputs (50-100 tokens) give the Lookback Ratio enough
+# generation steps to detect and correct attention drift.  QA answers are
+# 1-5 tokens — the gate fires too late to have any effect.
 #
 # Usage:
-#   nohup bash run_pipeline.sh > pipeline_qa.log 2>&1 &
-#
-# Or run individual datasets:
-#   bash run_pipeline.sh squad
-#   bash run_pipeline.sh trivia_qa nq
+#   nohup bash run_pipeline.sh > pipeline_qa.log 2>&1 &          # all QA datasets
+#   nohup bash run_pipeline.sh xsum > pipeline_xsum.log 2>&1 &   # XSum only
+#   bash run_pipeline.sh squad trivia_qa
 set -e
 
 PYTHON=/home/anish/miniconda3/envs/se_probes/bin/python
 WORKDIR=/home/anish/yaawar/LLM/semantic-entropy-probes
 cd "$WORKDIR"
 
-# If specific datasets passed as args, use those; otherwise use all 4
+# If specific datasets passed as args, use those; otherwise use all 4 QA datasets
 if [ $# -gt 0 ]; then
     DATASETS=("$@")
 else
@@ -79,13 +82,17 @@ echo "=== STAGE 6: Gated Inference (SEP + Lookback Ratio) ==="
 ALPHA=${ALPHA:-10.0}
 SEP_THRESHOLD=${SEP_THRESHOLD:-0.5}
 TOKEN_TYPE=${TOKEN_TYPE:-TBG}
+HARD_GATE=${HARD_GATE:-""}   # set to "--hard_gate" to enable binary gate
 for ds in "${DATASETS[@]}"; do
+    # XSum needs more tokens and a lower accuracy threshold (handled inside
+    # inference_with_gate.py automatically, but we log the intent here).
     echo "[$(date)] Running gated inference for $ds  (alpha=$ALPHA, threshold=$SEP_THRESHOLD, token=$TOKEN_TYPE)..."
     $PYTHON inference_with_gate.py \
         --dataset "$ds" \
         --alpha "$ALPHA" \
         --sep_threshold "$SEP_THRESHOLD" \
         --token_type "$TOKEN_TYPE" \
+        $HARD_GATE \
         2>&1 | tee "$LOG_DIR/gated_inference_${ds}.log"
     echo ""
 done

@@ -138,6 +138,27 @@ def load_ds(dataset_name, seed, add_options=None):
         train_dataset = dataset['train']
         validation_dataset = dataset['test']
 
+    elif dataset_name == "xsum":
+        # XSum (extreme summarization) — BBC news articles + single-sentence summaries.
+        # Used as the Lookback Gate testbed because generated summaries are long enough
+        # (50-100 tokens) for attention drift to manifest across generation steps.
+        dataset = datasets.load_dataset("EdinburghNLP/xsum")
+
+        def reformat_xsum(x):
+            # Store the article in 'question' so the existing prompt builders work.
+            # The article prefix and "Summary:" suffix are injected here so that
+            # run_qa_generation.py sees a BRIEF_PROMPT + "question\nAnswer:" which maps
+            # naturally to "article\nSummary:" when XSUM_BRIEF_PROMPT is used.
+            return {
+                'question': f"Article: {x['document']}\nSummary:",
+                'answers': {'text': [x['summary']]},
+                'context': x['document'],
+                'id': str(x['id']),
+            }
+
+        train_dataset = [reformat_xsum(d) for d in dataset["train"]]
+        validation_dataset = [reformat_xsum(d) for d in dataset["validation"]]
+
     elif dataset_name == "record":
         # Load the JSON file
         for split in ["train", "dev"]:

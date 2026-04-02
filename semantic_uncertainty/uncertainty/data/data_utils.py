@@ -159,6 +159,43 @@ def load_ds(dataset_name, seed, add_options=None):
         train_dataset = [reformat_xsum(d) for d in dataset["train"]]
         validation_dataset = [reformat_xsum(d) for d in dataset["validation"]]
 
+    elif dataset_name == "halueval_qa":
+        # HaluEval QA — questions with a correct answer and supporting knowledge.
+        # We use 'knowledge' as context and 'right_answer' as the reference answer.
+        # The hallucinated_answer field is ignored here (not needed for generation).
+        dataset = datasets.load_dataset("pminervini/HaluEval", "qa_samples")
+        md5hash = lambda s: str(int(hashlib.md5(s.encode('utf-8')).hexdigest(), 16))
+
+        def reformat_halueval(x):
+            return {
+                'question': x['question'],
+                'answers': {'text': [x['answer']]},
+                'context': x.get('knowledge', ''),
+                'id': md5hash(x['question']),
+            }
+
+        all_data = [reformat_halueval(d) for d in dataset["data"]]
+        split_ds = datasets.Dataset.from_list(all_data).train_test_split(
+            test_size=0.2, seed=seed)
+        train_dataset = split_ds['train']
+        validation_dataset = split_ds['test']
+
+    elif dataset_name == "cnn_dailymail":
+        # CNN/DailyMail summarization — same structure as XSum.
+        # We store the article in 'context' and the highlight summary in 'answers'.
+        dataset = datasets.load_dataset("cnn_dailymail", "3.0.0")
+
+        def reformat_cnn(x):
+            return {
+                'question': f"Article: {x['article']}\nSummary:",
+                'answers': {'text': [x['highlights']]},
+                'context': x['article'],
+                'id': str(x['id']),
+            }
+
+        train_dataset = [reformat_cnn(d) for d in dataset["train"]]
+        validation_dataset = [reformat_cnn(d) for d in dataset["validation"]]
+
     elif dataset_name == "record":
         # Load the JSON file
         for split in ["train", "dev"]:

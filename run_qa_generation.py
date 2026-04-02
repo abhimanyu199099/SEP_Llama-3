@@ -22,8 +22,8 @@ from collections import Counter
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "semantic_uncertainty"))
 
-from uncertainty.data.data_utils import load_ds
-from uncertainty.models.huggingface_models import HuggingfaceModel
+from semantic_uncertainty.uncertainty.data.data_utils import load_ds
+from semantic_uncertainty.uncertainty.models.huggingface_models import HuggingfaceModel
 from common_utils import (
     MODEL_NAME, NUM_SAMPLES_QA, NUM_GENERATIONS_QA,
     TEMPERATURE_HIGH, TEMPERATURE_LOW, NUM_FEW_SHOT,
@@ -31,6 +31,9 @@ from common_utils import (
     ALL_DATASETS, XSUM_DATASETS, OUTPUT_BASE,
     XSUM_MAX_NEW_TOKENS, XSUM_NUM_GENERATIONS, XSUM_NUM_FEW_SHOT,
     XSUM_NUM_SAMPLES, XSUM_BRIEF_PROMPT,
+    CNN_DATASETS, CNN_NUM_SAMPLES, CNN_NUM_GENERATIONS,
+    CNN_MAX_NEW_TOKENS, CNN_NUM_FEW_SHOT, CNN_BRIEF_PROMPT,
+    HALUEVAL_DATASETS, HALUEVAL_NUM_SAMPLES, HALUEVAL_USE_CONTEXT,
 )
 
 
@@ -132,12 +135,32 @@ def main():
     args = parse_args()
     dataset_name = args.dataset
     is_xsum = dataset_name in XSUM_DATASETS
+    is_cnn = dataset_name in CNN_DATASETS
+    is_summ = is_xsum or is_cnn          # any summarization task
+    is_halueval = dataset_name in HALUEVAL_DATASETS
 
     # Dataset-dependent defaults
-    num_samples    = args.num_samples or (XSUM_NUM_SAMPLES if is_xsum else NUM_SAMPLES_QA)
-    num_few_shot   = XSUM_NUM_FEW_SHOT if is_xsum else NUM_FEW_SHOT
-    num_generations = XSUM_NUM_GENERATIONS if is_xsum else NUM_GENERATIONS_QA
-    max_new_tokens = XSUM_MAX_NEW_TOKENS if is_xsum else MAX_NEW_TOKENS
+    if is_xsum:
+        num_samples    = args.num_samples or XSUM_NUM_SAMPLES
+        num_few_shot   = XSUM_NUM_FEW_SHOT
+        num_generations = XSUM_NUM_GENERATIONS
+        max_new_tokens = XSUM_MAX_NEW_TOKENS
+        brief_prompt   = XSUM_BRIEF_PROMPT
+        use_context    = True
+    elif is_cnn:
+        num_samples    = args.num_samples or CNN_NUM_SAMPLES
+        num_few_shot   = CNN_NUM_FEW_SHOT
+        num_generations = CNN_NUM_GENERATIONS
+        max_new_tokens = CNN_MAX_NEW_TOKENS
+        brief_prompt   = CNN_BRIEF_PROMPT
+        use_context    = True
+    else:
+        num_samples    = args.num_samples or (HALUEVAL_NUM_SAMPLES if is_halueval else NUM_SAMPLES_QA)
+        num_few_shot   = NUM_FEW_SHOT
+        num_generations = NUM_GENERATIONS_QA
+        max_new_tokens = MAX_NEW_TOKENS
+        brief_prompt   = BRIEF_PROMPT
+        use_context    = HALUEVAL_USE_CONTEXT if is_halueval else USE_CONTEXT
 
     # Reproducibility
     random.seed(SEED_QA)
@@ -170,10 +193,10 @@ def main():
 
     # Select few-shot examples from answerable training set
     prompt_indices = random.sample(answerable_train, min(num_few_shot, len(answerable_train)))
-    if is_xsum:
-        few_shot_prompt = build_few_shot_prompt_xsum(train_ds, prompt_indices, XSUM_BRIEF_PROMPT)
+    if is_summ:
+        few_shot_prompt = build_few_shot_prompt_xsum(train_ds, prompt_indices, brief_prompt)
     else:
-        few_shot_prompt = build_few_shot_prompt(train_ds, prompt_indices, BRIEF_PROMPT, USE_CONTEXT)
+        few_shot_prompt = build_few_shot_prompt(train_ds, prompt_indices, brief_prompt, use_context)
 
     logging.info(f"Few-shot prompt ({len(prompt_indices)} examples):")
     logging.info(few_shot_prompt[:500] + "...")
@@ -210,10 +233,10 @@ def main():
         context = example.get("context", None)
         example_id = example.get("id", str(idx))
 
-        if is_xsum:
+        if is_summ:
             test_input = build_test_input_xsum(context)
         else:
-            test_input = build_test_input(question, context, USE_CONTEXT)
+            test_input = build_test_input(question, context, use_context)
         local_prompt = few_shot_prompt + test_input
 
         # --- High-temp generations for SE computation ---

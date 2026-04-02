@@ -34,8 +34,22 @@ XSUM_BRIEF_PROMPT = "Summarize the following article in one sentence.\n"
 XSUM_USE_CONTEXT = True
 XSUM_ACC_THRESHOLD = 0.2         # ROUGE-L / F1 threshold: summaries score ~0.2-0.4
 
+# --- CNN/DailyMail Configuration (summarization, same pipeline as XSum) ---
+CNN_DATASETS = ["cnn_dailymail"]
+CNN_NUM_SAMPLES = 1000
+CNN_NUM_GENERATIONS = 5
+CNN_MAX_NEW_TOKENS = 150          # CNN highlights can be multi-sentence; allow more room
+CNN_NUM_FEW_SHOT = 3
+CNN_BRIEF_PROMPT = "Summarize the following article.\n"
+CNN_ACC_THRESHOLD = 0.2
+
+# --- HaluEval QA Configuration (QA with supporting context) ---
+HALUEVAL_DATASETS = ["halueval_qa"]
+HALUEVAL_NUM_SAMPLES = 2000
+HALUEVAL_USE_CONTEXT = True       # use the 'knowledge' field as context
+
 # All datasets (QA + summarization) — used for --dataset choices
-ALL_DATASETS = QA_DATASETS + XSUM_DATASETS
+ALL_DATASETS = QA_DATASETS + XSUM_DATASETS + CNN_DATASETS + HALUEVAL_DATASETS
 
 # --- Legacy XSum (Llama-3 pipeline, kept for compatibility) ---
 NUM_SAMPLES_XSUM = 1000

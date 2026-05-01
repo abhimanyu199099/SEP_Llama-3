@@ -17,8 +17,8 @@ import os
 from tqdm import tqdm
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from common_utils import (
-    NLI_MODEL, QA_DATASETS, OUTPUT_BASE,
-    CONDITION_ON_QUESTION, STRICT_ENTAILMENT,
+    NLI_MODEL, QA_DATASETS, ALL_DATASETS, RAGTRUTH_DATASETS,
+    OUTPUT_BASE, CONDITION_ON_QUESTION, STRICT_ENTAILMENT,
 )
 
 
@@ -27,8 +27,9 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NLI-based Semantic Entropy Labels")
-    parser.add_argument("--dataset", required=True, choices=QA_DATASETS,
-                        help="QA dataset name")
+    _nli_datasets = [d for d in ALL_DATASETS if d not in RAGTRUTH_DATASETS]
+    parser.add_argument("--dataset", required=True, choices=_nli_datasets,
+                        help="Dataset name (all except ragtruth, which uses map_ragtruth_labels.py)")
     parser.add_argument("--condition_on_question", action=argparse.BooleanOptionalAction,
                         default=CONDITION_ON_QUESTION,
                         help="Prepend question to generations for NLI")
@@ -110,7 +111,15 @@ def main():
     with open(input_file, "rb") as f:
         data = pickle.load(f)
 
-    logging.info(f"Settings: condition_on_question={args.condition_on_question}, "
+    # For summarization datasets the "question" field is the full article —
+    # prepending it to NLI pairs would blow the 512-token limit.
+    is_summ = args.dataset in (XSUM_DATASETS + CNN_DATASETS)
+    condition_on_question = args.condition_on_question and not is_summ
+    if is_summ and args.condition_on_question:
+        logging.info("Summarization dataset: overriding condition_on_question=False "
+                     "(article text too long for NLI input).")
+
+    logging.info(f"Settings: condition_on_question={condition_on_question}, "
                  f"strict_entailment={args.strict_entailment}")
 
     output_data = []
@@ -126,7 +135,7 @@ def main():
 
         # Condition on question: prepend question to each generation for NLI
         question = item.get('question', '')
-        if args.condition_on_question and question:
+        if condition_on_question and question:
             gens_for_nli = [f"{question} {g}" for g in gens]
         else:
             gens_for_nli = gens

@@ -38,8 +38,8 @@ XSUM_ACC_THRESHOLD = 0.2         # ROUGE-L / F1 threshold: summaries score ~0.2-
 CNN_DATASETS = ["cnn_dailymail"]
 CNN_NUM_SAMPLES = 1000
 CNN_NUM_GENERATIONS = 5
-CNN_MAX_NEW_TOKENS = 150          # CNN highlights can be multi-sentence; allow more room
-CNN_NUM_FEW_SHOT = 3
+CNN_MAX_NEW_TOKENS = 100
+CNN_NUM_FEW_SHOT = 1              # articles are long even after truncation; 1 example avoids OOM
 CNN_BRIEF_PROMPT = "Summarize the following article.\n"
 CNN_ACC_THRESHOLD = 0.2
 
@@ -48,8 +48,13 @@ HALUEVAL_DATASETS = ["halueval_qa"]
 HALUEVAL_NUM_SAMPLES = 2000
 HALUEVAL_USE_CONTEXT = True       # use the 'knowledge' field as context
 
-# All datasets (QA + summarization) — used for --dataset choices
-ALL_DATASETS = QA_DATASETS + XSUM_DATASETS + CNN_DATASETS + HALUEVAL_DATASETS
+# --- RAGTruth Configuration (RAG hallucination benchmark, pre-labelled) ---
+# Stages 1+2 (generation + NLI) are replaced by map_ragtruth_labels.py.
+# Stages 3-7 run unchanged.
+RAGTRUTH_DATASETS = ["ragtruth"]
+
+# All datasets (QA + summarization + RAG) — used for --dataset choices
+ALL_DATASETS = QA_DATASETS + XSUM_DATASETS + CNN_DATASETS + HALUEVAL_DATASETS + RAGTRUTH_DATASETS
 
 # --- Legacy XSum (Llama-3 pipeline, kept for compatibility) ---
 NUM_SAMPLES_XSUM = 1000

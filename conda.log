@@ -1,0 +1,10 @@
+
+# conda environments:
+#
+# * -> active
+# + -> frozen
+base                 *   /home/jay_agarwal_2022/miniforge3
+epignn                   /home/jay_agarwal_2022/miniforge3/envs/epignn
+lgatr                    /home/jay_agarwal_2022/miniforge3/envs/lgatr
+se_probes                /home/jay_agarwal_2022/miniforge3/envs/se_probes
+

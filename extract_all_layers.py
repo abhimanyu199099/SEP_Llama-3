@@ -12,15 +12,15 @@ import pickle
 import argparse
 import logging
 import os
-from common_utils import QA_DATASETS, OUTPUT_BASE
+from common_utils import ALL_DATASETS, OUTPUT_BASE
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Extract all-layer features")
-    parser.add_argument("--dataset", required=True, choices=QA_DATASETS,
-                        help="QA dataset name")
+    parser.add_argument("--dataset", required=True, choices=ALL_DATASETS,
+                        help="Dataset name")
     return parser.parse_args()
 
 

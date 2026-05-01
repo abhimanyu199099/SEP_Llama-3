@@ -12,8 +12,9 @@
 #   bash run_pipeline.sh squad trivia_qa
 set -e
 
-PYTHON=/home/anish/miniconda3/envs/se_probes/bin/python
-WORKDIR=/home/anish/yaawar/LLM/semantic-entropy-probes
+PYTHON=/home/jay_agarwal_2022/miniforge3/envs/se_probes/bin/python
+WORKDIR=/home/jay_agarwal_2022/SEP_Llama-3
+export HF_HUB_CACHE=/data/scratch/jay_agarwal_2022/hf_cache
 cd "$WORKDIR"
 
 # If specific datasets passed as args, use those; otherwise use all 4 QA datasets

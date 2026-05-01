@@ -1,0 +1,704 @@
+Attention Is Not All You Need: Beating Hallucinations Using Causal
+Dynamic Routing
+Yaawar Askari, Jay Agarwal, Abhimanyu Bhowmik, Aman Agarwal, Dhruv Kumar,
+BITS Pilani
+Abstract
+Large Language Models (LLMs) often generate
+hallucinations, especially in abstractive summa-
+rization and open-set question answering. This
+undermines their reliability in real-world appli-
+cations where factual consistency is critical.
+Existing approaches rely largely on output-
+based evaluation or post-hoc verification,
+which provide limited insight into the inter-
+nal mechanisms that give rise to hallucinations.
+Furthermore, most previous work identifies cor-
+relational signals without isolating which inter-
+nal components causally contribute to halluci-
+nated outputs.
+In this paper, we propose a dynamic inference-
+time routing framework that uses model-
+internal signals to detect and mitigate halluci-
+nations in LLMs during generation. We use se-
+mantic entropy probes to estimate uncertainty,
+and attention-based grounding signals to guide
+selective suppression of attention heads that are
+not grounded with the context. We evaluate our
+approach on summarization and question an-
+swering benchmarks using standard factuality
+and QA metrics such as XSum, Natural Ques-
+tions, TriviaQA, and SQuAD, using Llama-2-
+7B. Our results show that internal signals can
+enable effective single-pass hallucination detec-
+tion and mitigation without external retrieval or
+multiple decoding passes.
+1 Introduction
+Large Language Models (LLMs) have rapidly ad-
+vanced the state of the art in natural language pro-
+cessing, showing strong performance on summa-
+rization, question answering, and reasoning tasks.
+Despite this, LLMs frequently hallucinate, gen-
+erating outputs that are factually incorrect or un-
+supported by the input context (Yu et al., 2024;
+Chuang et al., 2024). This is a critical problem
+in applications such as summarization and open-
+domain question answering, where factual accu-
+racy is essential for reliability and user trust (Wang
+et al., 2025). The frequency of hallucinations in
+LLMs limits their use in high-stakes domains such
+as journalism, healthcare, and knowledge retrieval
+(Kossen et al., 2024).
+In this work, we investigate the detection and
+mitigation of hallucinations in both open-domain
+question answering and abstractive summarization.
+The goal is to produce outputs that are factually
+grounded in the input context or external knowl-
+edge given an input document or question. How-
+ever, LLMs frequently rely on spurious correlations
+or parametric knowledge, which results in content
+that is either fabricated or unsupported (Yu et al.,
+2024; Chuang et al., 2024). It can be difficult to
+detect hallucinations because outputs can seem re-
+alistic, and standard overlap-based metrics such
+as ROUGE do not adequately capture factual con-
+sistency (Yu et al., 2024). Post-hoc detection is
+insufficient because hallucinations can arise during
+intermediate stages of generation, before they are
+observable in the final output. Thus, it is necessary
+to intervene at inference-time and take action to
+mitigate hallucinations before inaccurate content
+is generated for users (Wang et al., 2025; Kossen
+et al., 2024).
+Existing approaches to hallucination detection
+in LLMs largely rely on reference-based metrics
+or external verification models and operate at the
+output level. While these methods can identify
+factual inconsistencies, they do not provide in-
+sight into the internal mechanisms of LLMs and
+are not suitable for real-time mitigation. Recent
+work has explored internal signals such as uncer-
+tainty estimation (Kossen et al., 2024) and patterns
+from attention maps (Chuang et al., 2024). Se-
+mantic entropy methods approximate uncertainty
+by measuring variability across multiple genera-
+tions (Kossen et al., 2024), while attention-based
+approaches quantify the model’s reliance on input
+context (Chuang et al., 2024). Mechanistic inter-
+pretability studies further analyze the role of spe-
+1
+=======================
+cific attention heads and MLP layers in generating
+hallucinations (Yu et al., 2024). However, these ap-
+proaches are largely correlational, and few methods
+combine detection, mitigation, and causal valida-
+tion in a unified framework. In addition, many
+mitigation strategies rely on attention intervention
+or head-level modulation (Wang et al., 2025; Tong
+et al., 2025), which may introduce additional de-
+coding overhead or require architectural modifica-
+tion, limiting their applicability in latency-sensitive
+settings.
+In this paper, we propose a dynamic inference
+routing framework that uses model-internal sig-
+nals to identify and reduce hallucinations as they
+are being generated. We estimate model uncer-
+tainty with a lightweight semantic entropy probe
+trained on hidden states (Kossen et al., 2024), and
+combine it with attention-based grounding signals
+that quantify dependence on input context (Chuang
+et al., 2024). When the model is expected to be
+in a high uncertainty state, we dynamically ad-
+just the model’s behaviour by suppressing atten-
+tion heads with low context reliance, while context-
+grounded components retain their influence (Tong
+et al., 2025). This enables targeted hallucination
+mitigation at inference time, without extra decod-
+ing passes or external retrieval. We incorporate
+causal validation techniques, including ablation
+and blindness tests, to identify components that di-
+rectly contribute to hallucinated outputs (Yu et al.,
+2024).
+We evaluate our approach across both summa-
+rization and question answering benchmarks, in-
+cluding XSum, Natural Questions, TriviaQA, and
+SQuAD. Following prior work on semantic entropy
+probes (Kossen et al., 2024), we train probes across
+all hidden layers and identify the layers that provide
+the strongest predictive signals for hallucination.
+Contributions.Our main contributions are as
+follows:
+• Unified Internal-Signal Framework:We
+combine Semantic Entropy Probes (SEP) for
+uncertainty estimation (Kossen et al., 2024)
+with the Lookback Ratio grounding signal
+(Chuang et al., 2024) into a unified, single-
+pass inference framework that operates with-
+out retraining the base model. Prior work
+studies these signals separately: SEPs ex-
+tract semantic uncertainty from hidden states
+(Kossen et al., 2024), while Lookback Lens
+models contextual grounding using attention
+ratios (Chuang et al., 2024). We show that
+uncertainty-based signals (SEP) and attention-
+based grounding signals (Lookback) capture
+different and complementary aspects of hallu-
+cination risk, and that their combination im-
+proves detection performance over either sig-
+nal alone.
+• Uncertainty-Conditioned Inference-Time
+Intervention:Inspired by dynamic head gat-
+ing methods such as HA VE (Tong et al., 2025),
+we introduce a conditional attention interven-
+tion that activates only when high semantic
+entropy is detected (Kossen et al., 2024). Un-
+like always-on head modulation (Tong et al.,
+2025), our method selectively suppresses risky
+attention behavior during uncertain states, re-
+ducing hallucinations while preserving nor-
+mal generation when the model is confident.
+• Causal Analysis of Hallucination Mech-
+anisms:Following mechanistic interpretabil-
+ity approaches that use causal mediation and
+component-level ablation to analyze halluci-
+nations (Yu et al., 2024), we conduct struc-
+tured ablation and blindness tests to exam-
+ine whether identified attention heads causally
+contribute to hallucinations. Our experiments
+provide evidence that suppressing uncertainty-
+associated heads can directly alter halluci-
+nated outputs, moving beyond purely correla-
+tional analysis.
+• Bridging Uncertainty and Attention Dy-
+namics:We connect uncertainty estimation
+through Semantic Entropy Probes (SEP)
+(Kossen et al., 2024) with attention-based
+grounding signals such as the Lookback Ratio
+(Chuang et al., 2024) and dynamic head gating
+mechanisms (Tong et al., 2025), showing that
+internal entropy signals can guide structural in-
+terventions in transformer architectures. This
+provides a unified perspective linking model
+uncertainty and attention-based hallucination
+patterns.
+• Empirical Characterization of Halluci-
+nation Heads:We show that hallucination-
+associated heads tend to exhibit lower con-
+text attention, as measured by the Lookback
+Ratio (Chuang et al., 2024), and higher se-
+mantic entropy states captured by Semantic
+Entropy Probes (SEP) (Kossen et al., 2024)
+2
+=======================
+across prompts. This offers a clearer internal
+understanding of how hallucinations emerge
+during generation.
+2 Related Work
+2.1 Hallucination Detection and Uncertainty
+Estimation
+Till now, hallucination detection in LLMs has
+largely relied on output-based evaluation and un-
+certainty estimation. Metrics such as ROUGE fail
+to capture factual consistency in abstractive tasks.
+Recent approaches estimate uncertainty via seman-
+tic entropy, which quantifies output variability in
+semantic space. To reduce computational cost, Se-
+mantic Entropy Probes (SEP) predict semantic en-
+tropy directly from hidden states, demonstrating
+that hallucination signals are internally encoded
+within the model (Kossen et al., 2024). However,
+these methods remain largely correlational and of-
+ten require post-hoc analysis, limiting their appli-
+cability in real-time settings.
+We leverage single-pass internal signals to en-
+able both detection and intervention during infer-
+ence, moving beyond post-hoc or multi-sample ap-
+proaches.
+2.2 Attention-Based Grounding and
+Interpretability
+Attention-based methods analyze how LLMs uti-
+lize context during generation. The lookback ratio
+measures attention to source tokens versus gener-
+ated tokens, showing that reduced context reliance
+correlates with hallucination (Chuang et al., 2024).
+Extensions include attention editing methods that
+modify attention maps during inference (Wang
+et al., 2025) and head-level gating approaches that
+dynamically reweight attention contributions (Tong
+et al., 2025) to improve grounding.
+Mechanistic interpretability studies further identify
+internal components responsible for model behav-
+ior. Techniques such as logit lens and causal me-
+diation analysis link specific attention heads and
+MLP layers to output predictions (Yu et al., 2024).
+While these approaches provide insight into the
+internal causes of hallucination, they are largely
+diagnostic and not designed for adaptive control
+during generation.
+We integrate grounding signals (Chuang et al.,
+2024) with uncertainty estimates derived from Se-
+mantic Entropy Probes (Kossen et al., 2024) to
+enable dynamic, input-dependent intervention at
+inference time.
+2.3 Evaluation Benchmarks for Faithfulness
+and QA
+Hallucination evaluation has been studied across
+multiple benchmarks in both summarization and
+question answering. In summarization, highly ab-
+stractive datasets are commonly used because they
+encourage models to generate novel content and
+increase the risk of hallucinations (Chuang et al.,
+2024; Wang et al., 2025). Faithfulness evaluation in
+this setting remains challenging, as overlap-based
+metrics such as ROUGE do not fully capture fac-
+tual accuracy (Yu et al., 2024).
+In question answering, standard extractive and
+open-domain benchmarks evaluate correctness us-
+ing exact match and F1 scores. However, these
+metrics do not explicitly capture hallucination, es-
+pecially when models generate plausible but un-
+supported answers (Kossen et al., 2024; Yu et al.,
+2024). More recent work has proposed uncertainty-
+based detection (Kossen et al., 2024) and attention-
+based evaluation methods (Chuang et al., 2024),
+as well as attention intervention strategies (Wang
+et al., 2025).
+Despite these advances, existing benchmarks are
+primarily designed for evaluation rather than miti-
+gation, and they do not incorporate internal model
+signals or causal analysis (Yu et al., 2024). More-
+over, most hallucination studies focus on a single
+task, limiting understanding of how hallucinations
+generalize across domains.
+We perform a unified evaluation across summa-
+rization and question answering benchmarks and
+focus on inference-time mitigation using internal
+uncertainty (Kossen et al., 2024) and grounding
+signals (Chuang et al., 2024), bridging the gap be-
+tween evaluation and intervention.
+3 Methodology
+3.1 Overview
+We combine hallucination detection with targeted
+attention intervention. First, we label data using
+semantic entropy computed from clustered stochas-
+tic generations (Kossen et al., 2024), and train a
+lightweight SEP on hidden states to predict hallu-
+cination risk. Next, we extract LR features from
+attention to measure how strongly each head relies
+on the input context (Chuang et al., 2024). Finally,
+we apply a head-adaptive gating mechanism that
+suppresses low-grounded attention heads during
+3
+=======================
+inference (Tong et al., 2025), triggered only when
+the SEP indicates high hallucination risk.
+3.2 Semantic Entropy Probe
+In order to prepare the dataset for training our Se-
+mantic Entropy Probe (SEP), we sample 2000 ex-
+amples from datasets such as XSum or SQuAD.
+Next, we generate 10 stochastic summaries per ex-
+ample using the Meta Llama2-7B model. Then,
+we use DeBERTa as an NLI model to cluster the
+generated answers by semantic equivalence follow-
+ing prior semantic entropy estimation procedures
+(Kossen et al., 2024). Samples showing bidirec-
+tional entailment are assigned to the same cluster.
+Further, we calculate the semantic entropy over
+these clusters. Samples with high agreement (>
+0.7) are labeled Confident (0), while those with
+low agreement (< 0.3) are labeled Hallucinated (1).
+Ambiguous samples are discarded.
+Then, we perform a prompt-only forward pass on
+each filtered sample and extract the hidden state
+of the last token from the final transformer layer.
+We then train an L2-regularized logistic regression
+classifier on the normalized hidden state features,
+in order to predict hallucinations. We then evaluate
+the obtained classifier on the rest of the dataset, and
+obtain the best series of layers ( >= 5) which give
+the best AUROC score in detecting hallucinations.
+3.3 Lookback Ratio Feature Extraction
+We extract lookback ratio (LR) features to quantify
+how strongly each attention head grounds its pre-
+dictions in the input context (Chuang et al., 2024).
+For each sample, we run the model with attention
+outputs enabled, collecting attention weights at ev-
+ery generation step. At each layerland attention
+headh, we compute the proportion of attention
+mass assigned to prompt tokens relative to the total
+attention mass over all tokens (prompt + generated),
+yielding a per-step grounding score. These scores
+are averaged across all generated tokens to obtain
+a stable estimate LRl,h ∈[0,1] , where higher val-
+ues indicate stronger reliance on the input context.
+The resulting per-head scores are flattened into a
+fixed-length feature vector of sizeL x Hfor each
+sample. These features are paired with semantic
+entropy labels and used to drive inference-time in-
+terventions that selectively suppress low-lookback
+(i.e., less grounded) attention heads.
+3.4 Head-Adaptive Gating Using Lookback
+Ratio
+We introduce a head-adaptive gating mechanism
+that selectively modulates attention heads during
+generation based on their grounding behavior, in-
+spired by prior head-level modulation strategies
+(Tong et al., 2025). Specifically, at each decod-
+ing step, we compute the lookback ratio LRl,h for
+every attention head. This produces a per-head
+grounding score in [0,1], where higher values in-
+dicate stronger reliance on the input context. We
+then transform this score into a multiplicative gate
+applied directly to the head’s contribution to the
+attention output. We introduce two variants of this
+multiplicative gate - a soft variant, and a hard vari-
+ant. In the soft variant, the gate is defined as:
+gl,h =σ
+ 
+(LRl,h −τ)·α
+
+where τ is a cutoff threshold and α controls sharp-
+ness; this centers the gating function around the cut-
+off, suppressing low-lookback (ungrounded) heads
+while preserving high-lookback (grounded) ones.
+In the hard variant, heads are either fully retained
+or suppressed based on whether LRl,h ≥τ . The
+gating is applied immediately after the attention
+softmax and before the output projection, ensuring
+that each head’s contribution is modulated indepen-
+dently without altering the attention distribution
+itself. To minimize unnecessary intervention, this
+mechanism is activated only when a lightweight
+semantic entropy probe predicts high hallucination
+risk, enabling targeted, inference-time control over
+attention flow.
+4 Experimental Setup
+4.1 Datasets
+We evaluate our approach on four widely used NLP
+benchmarks spanning summarization and question
+answering. XSum is an abstractive summariza-
+tion dataset consisting of BBC news articles paired
+with single-sentence summaries, designed to test
+extreme compression and factual consistency. Nat-
+ural Questions (NQ) is a question answering dataset
+derived from real user queries issued to a search
+engine, with answers grounded in Wikipedia pas-
+sages, emphasizing open-domain QA. TriviaQA
+contains trivia-style questions with evidence docu-
+ments from the web, requiring multi sentence rea-
+soning and answer extraction. SQuAD is a read-
+ing comprehension dataset based on Wikipedia ar-
+ticles, where models must extract answer spans
+4
+=======================
+Dataset Source Domain Size
+XSum BBC News∼227K
+NQ Google + Wiki QA∼307K
+TriviaQA Trivia + Wiki QA∼95K
+SQuAD Wiki RC∼100K
+Table 1: Datasets used in our experiments.
+from given contexts, focusing on precise span-
+level understanding. These datasets collectively
+enable evaluation of hallucination behavior across
+both generative summarization and extractive/open-
+domain question answering settings.
+4.2 Models
+We conduct our experiments using two open-
+weight large language models from the LLaMA
+family. Specifically, we use LLaMA 2-7B and
+LLaMA 3-8B-Instruct for both the abstract summa-
+rization and question-answering tasks. The models
+are used in a few shot inference setting, where they
+are provided 5 question-answer (or 3 summariza-
+tion) examples along with the actual question/data
+to summarize.
+4.3 Evaluation Metrics
+We evaluate our method using a combination of
+generation quality and detection metrics. ROUGE
+is used to approximate semantic consistency in the
+context of semantic entropy. To select the most
+informative hidden layer for the Semantic Entropy
+Probe (SEP), we use AUROC, which measures
+the model’s ability to discriminate between halluci-
+nated and factual outputs. For downstream evalua-
+tion, we report token-level F1 score to capture the
+balance between precision and recall at the token
+level, along with accuracy to measure exact token
+prediction correctness.
+4.4 Implementation Details
+We use a few-shot prompting strategy with all
+evaluated models, with 5 examples given for each
+QA task generation, and 3 examples given for ev-
+ery summarization task generation. For sampling
+question-answer pairs from the selected datasets for
+training the SEP, we use a random seed of 20. We
+set max_new_tokens = 50 for generating responses
+for evaluation on QA tasks, and max_new_tokens
+= 100 on summarization tasks. When models are
+used in a high temperature setting, the tempera-
+ture is set to 1.0. Otherwise, if they are used in a
+low-temperature setting, it is set to 0.1.
+5 Results and Discussion
+5.1 Cross-Dataset Performance
+Objective.This experiment evaluates whether
+the proposed Semantic Entropy Probe (SEP) learns
+generalizable hallucination signals that transfer
+across datasets. Specifically, we assess whether
+SEP trained on one dataset maintains strong perfor-
+mance when applied to out-of-distribution datasets,
+and quantify the extent of performance degradation
+under cross-domain transfer.
+Findings.We evaluate the generalization of the
+Semantic Entropy Probe (SEP) using a cross-
+dataset AUROC matrix. When trained and eval-
+uated on the same dataset (in-distribution), SEP
+achieves a mean AUROC of 0.7752. Under cross-
+dataset transfer (out-of-distribution), performance
+degrades moderately to an average AUROC of
+0.7227. While some transfer pairs (e.g., SQuAD to
+TriviaQA) retain strong performance, others exhibit
+larger drops, indicating partial domain sensitivity.
+Overall, these results demonstrate that SEP cap-
+tures generalizable hallucination signals and is able
+to detect hallucinations outside its in-domain data,
+while still benefiting from in-domain calibration.
+5.2 Ablation Study
+Objective.The ablation study evaluates the
+causal role of grounding-aware attention heads and
+the effectiveness of head-adaptive gating. Specif-
+ically, it investigates (1) whether selectively sup-
+pressing low lookback-ratio heads improves robust-
+ness compared to indiscriminate removal, and (2)
+whether high lookback-ratio heads are causally re-
+sponsible for accurate, grounded predictions.
+Findings.Results show that soft, sigmoid-based
+gating consistently outperforms or matches hard
+knockout of all heads, indicating that selective sup-
+pression preserves useful information while miti-
+gating ungrounded contributions. Knockout experi-
+ments demonstrate that indiscriminate removal of
+attention heads leads to larger performance degra-
+dation, supporting the need for fine-grained control.
+Blindness tests further reveal that removing high
+lookback-ratio heads significantly reduces accuracy
+on multiple datasets, confirming their causal role in
+grounding model predictions. Overall, the findings
+validate the effectiveness of head-adaptive gating
+and highlight the importance of grounding-aware
+attention in hallucination mitigation.
+5
+=======================
+Model Architecture Params Mode
+LLaMA 2-7B Decoder-only Transformer 7B Few-shot
+LLaMA 3-8B-Instruct Decoder-only Transformer 8B Few-shot
+Table 2: Models used in our experiments.
+Metric Measures Higher = Better?
+ROUGE N-gram overlap for semantic entropy estimation Yes
+AUROC Discrimination ability for SEP layer selection Yes
+Token-level F1 Precision/recall balance at token level Yes
+Accuracy Exact token prediction correctness Yes
+Table 3: Evaluation metrics used in our study.
+Train \Eval SQuAD TriviaQA NQ
+SQuAD0.76220.7488 0.7428
+TriviaQA 0.68300.77050.7162
+NQ 0.7155 0.73020.7929
+Table 4: Cross-dataset AUROC for hallucination detec-
+tion using SEP. Diagonal entries denote in-distribution
+performance, while off-diagonal entries correspond to
+out-of-distribution transfer.
+5.3 Discussion
+Our results demonstrate that hallucination in large
+language models can be effectively detected and
+mitigated using internal signals without requiring
+external verification. SEPs provide a lightweight
+and generalizable mechanism for identifying hal-
+lucination risk from hidden states, while LR fea-
+tures reveal interpretable grounding patterns at the
+attention-head level. Together, these components
+enable targeted intervention via head-adaptive gat-
+ing, which selectively suppresses ungrounded at-
+tention heads. Across datasets, we observe that this
+combination maintains strong performance while
+improving robustness, highlighting the importance
+of internal model dynamics in controlling halluci-
+nations.
+These findings suggest a shift from post-hoc ver-
+ification toward inference-time control of model
+behavior. By leveraging signals already present
+within the model, our approach avoids the over-
+head of additional models or external knowledge
+sources, making it efficient and broadly applica-
+ble. The use of attention-based grounding signals
+further opens avenues for interpretable and con-
+trollable generation, where specific components of
+the model can be modulated based on predicted
+risk. This points to a promising direction for build-
+ing more reliable language models through internal
+monitoring and adaptive computation.
+6 Conclusion
+We present a lightweight, inference-time frame-
+work for hallucination detection and mitigation
+that combines a Semantic Entropy Probe (SEP)
+with grounding-aware attention control. SEP pre-
+dicts hallucination risk from hidden states, while
+lookback ratio (LR) features quantify how strongly
+attention heads rely on the input context. We use
+these signals to apply head-adaptive gating, selec-
+tively suppressing ungrounded attention heads dur-
+ing generation. Across four datasets, our method
+demonstrates strong generalization (OOD/ID AU-
+ROC ratio of 0.93) and causal effectiveness, show-
+ing that grounding-aware attention modulation can
+improve reliability without degrading performance.
+Our results highlight the value of internal model
+signals for efficient and interpretable control of
+generation, offering an alternative to post-hoc or
+external verification approaches.
+Future work will extend this approach to larger
+models, additional tasks, and more robust gating
+strategies, as well as explore combining internal
+signals with external knowledge for improved fac-
+tuality.
+Limitations
+• Dataset limitations:Our experiments
+are limited to English-language datasets
+(XSum, SQuAD, TriviaQA, and Natural Ques-
+tions), which primarily consist of news and
+Wikipedia-based content. These datasets do
+not capture low-resource languages, diverse
+dialects, or domain-specific knowledge, and
+may exhibit annotation noise or bias. Addi-
+tionally, the sampled subset used for seman-
+tic entropy labeling is relatively small, which
+may limit coverage of rare or complex hallu-
+cination cases.
+• Methodological limitations:Our approach
+6
+=======================
+Dataset Orig (Trig) Gate Knockout Orig (Pass) Blind Observation
+TriviaQA 0.25 0.25 0.19 0.83 0.83 Soft>Hard; Blindness inconclusive
+SQuAD 0.09 0.07 0.08 0.44 0.37 Hard≈Soft; Grounding causal
+NQ 0.11 0.11 0.07 0.53 0.50 Soft>Hard; Grounding causal
+Table 5: Causal validation results of head-adaptive gating. “Orig (Trig)” denotes accuracy on SEP-triggered samples
+before gating, “Gate” corresponds to sigmoid gating, and “Knockout” denotes hard removal of all heads. “Orig
+(Pass)” and “Blind” represent accuracy before and after zeroing high-LR heads on SEP-passthrough samples.
+relies on semantic entropy as a proxy for
+hallucination, which assumes that agreement
+across sampled generations correlates with
+factual correctness. This assumption may not
+always hold, particularly for ambiguous or un-
+derspecified queries. Furthermore, lookback
+ratio focuses only on attention patterns and
+does not capture all sources of hallucination,
+such as parametric knowledge errors or rea-
+soning failures.
+• Model limitations:We evaluate our method
+on open-weight models up to 8B parameters
+(LLaMA 2-7B and LLaMA 3-8B-Instruct).
+The behavior of the proposed approach on
+larger or proprietary models remains unex-
+plored due to insufficient compute resources
+and access limitations. In addition, our
+method requires access to internal activations
+and attention weights, which may not be avail-
+able in closed-source or API-only systems.
+• Computational limitations:Extracting se-
+mantic entropy labels requires multiple
+stochastic generations per sample, and look-
+back ratio computation requires attention out-
+puts during decoding, both of which increase
+computational cost. As a result, experiments
+are conducted on limited subsets and model
+sizes, and full-scale evaluations on larger
+datasets or models are constrained by hard-
+ware availability.
+• Generalizability:While our method shows
+promising cross-dataset performance within
+question answering and summarization tasks,
+its effectiveness in other settings such as di-
+alogue, code generation, or highly special-
+ized domains remains untested. Additionally,
+generalization to multilingual or low-resource
+scenarios is unclear, and may require further
+adaptation of both the entropy-based labeling
+and attention-based features.
+References
+Yung-Sung Chuang, Linlu Qiu, Cheng-Yu Hsieh, Ran-
+jay Krishna, Yoon Kim, and James Glass. 2024.
+Lookback lens: Detecting and mitigating contextual
+hallucinations in large language models using only
+attention maps.arXiv preprint arXiv:2407.07071.
+Jannik Kossen, Jiatong Han, Muhammed Razzak, Lisa
+Schut, Shreshth Malik, and Yarin Gal. 2024. Seman-
+tic entropy probes: Robust and cheap hallucination
+detection in llms.arXiv preprint arXiv:2406.15927.
+Xin Tong, Zhi Lin, Jingya Wang, and Bo Jin. 2025.
+Have: Head-adaptive gating and value calibration for
+hallucination mitigation in large language models.
+arXiv preprint arXiv:2509.06596.
+Yu Wang, Jiaxin Zhang, Xiang Gao, Wendi Cui, Peng Li,
+and Kamalika Das. 2025. Gradient-guided attention
+map editing: Towards efficient contextual hallucina-
+tion mitigation.arXiv preprint arXiv:2503.08963.
+Lei Yu, Meng Cao, Jackie Chi Kit Cheung, and Yue
+Dong. 2024. Mechanistic understanding and miti-
+gation of language model non-factual hallucinations.
+InFindings of the Association for Computational
+Linguistics: EMNLP 2024.
+A Full Prompt Templates
+We provide the exact prompt templates used for
+generation to ensure reproducibility.
+Natural Questions (NQ).Answer the following
+question as briefly as possible. Question: when was
+the first gas powered airplane invented? Answer:
+1903
+Question: what was the original name of jack-
+sonville florida? Answer: Fort Caroline
+Question: damage to this part of the brain can
+result in reduced ability to comprehend and/or pro-
+duce humor? Answer: right hemisphere
+Question: what does the green on the torres strait
+islander flag represent? Answer: the land
+Question: who are the democrats running for
+governor of texas? Answer: Lupe Valdez
+SQuAD.Answer the following question as
+briefly as possible. Question: Who is one of the
+largest landowners in the UK? Answer: The Min-
+istry of Defence
+7
+=======================
+Question: What adverse effect was thalidomide
+associated with? Answer: congenital abnormalities
+Question: When was the Lorelei Fountain writ-
+ten about? Answer: 1838
+Question: Who starred in the film Three Smart
+Girls? Answer: Deanna Durbin
+Question: What was the name of Madonna’s
+eleventh album? Answer: Hard Candy
+TriviaQA.Answer the following question as
+briefly as possible. Question: What is the first
+name of James bond villain Dr No? Answer: julius
+Question: Who was crowned MotoGP World
+Champion after he finished third in the Malaysian
+Grand Prix on 10 October 2010? Answer: jorge
+lorenzo
+Question: What German battleship was sunk in
+November 1944 by Barnes-Wallis’ Tallboy bombs,
+dropped by Lancaster bombers? Answer: tirpitz
+Question: Which TV personality has written the
+best-selling autobiography ’My Animals and Other
+Family’? Answer: clare balding
+Question: Which of the seven wonders of the
+ancient world was thought to have straddled the
+harbour of a Greek island? Answer: colossus of
+rhodes
+XSum.Summarize the following article in one
+sentence.
+Article: [ARTICLE TEXT] Summary:
+Article: [ARTICLE TEXT] Summary:
+Article: [ARTICLE TEXT] Summary:
+8
+=======================
+Figure 1:Overview of our hallucination mitigation pipeline.The system consists of three stages: (1) Semantic
+Entropy Probe (SEP) for hallucination detection, (2) Lookback Ratio (LR) computation to estimate attention
+grounding, and (3) Head-adaptive gating to suppress ungrounded attention heads during generation.
+9

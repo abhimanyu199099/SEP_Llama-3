@@ -1,0 +1,131 @@
+nohup: ignoring input
+2026-04-18 21:43:41,419 - INFO - Loading dataset: xsum...
+Downloading readme: 0.00B [00:00, ?B/s]Downloading readme: 6.42kB [00:00, 7.93MB/s]
+Downloading and preparing dataset None/None to /home/jay_agarwal_2022/.cache/huggingface/datasets/EdinburghNLP___parquet/EdinburghNLP--xsum-d3f384e48d78c019/0.0.0/2a3b91fbd88a2c90d1dbbb32b460cf621d31bd5b05b934492fdef7d8d6f236ec...
+Downloading data files:   0%|          | 0/3 [00:00<?, ?it/s]
+Downloading data:   0%|          | 0.00/300M [00:00<?, ?B/s][A
+Downloading data:   1%|          | 1.65M/300M [00:00<00:18, 16.5MB/s][A
+Downloading data:   4%|▎         | 11.2M/300M [00:00<00:04, 62.7MB/s][A
+Downloading data:   6%|▌         | 17.4M/300M [00:00<00:04, 62.0MB/s][A
+Downloading data:   8%|▊         | 23.6M/300M [00:00<00:05, 54.4MB/s][A
+Downloading data:  10%|▉         | 29.9M/300M [00:00<00:04, 57.0MB/s][A
+Downloading data:  12%|█▏        | 36.1M/300M [00:00<00:04, 58.6MB/s][A
+Downloading data:  14%|█▍        | 42.4M/300M [00:00<00:04, 60.2MB/s][A
+Downloading data:  16%|█▋        | 49.0M/300M [00:00<00:04, 61.9MB/s][A
+Downloading data:  19%|█▊        | 55.5M/300M [00:00<00:03, 62.7MB/s][A
+Downloading data:  21%|██        | 61.8M/300M [00:01<00:03, 61.2MB/s][A
+Downloading data:  23%|██▎       | 68.0M/300M [00:01<00:03, 61.6MB/s][A
+Downloading data:  25%|██▍       | 74.2M/300M [00:01<00:03, 60.4MB/s][A
+Downloading data:  27%|██▋       | 80.3M/300M [00:01<00:03, 59.2MB/s][A
+Downloading data:  29%|██▉       | 86.7M/300M [00:01<00:03, 60.5MB/s][A
+Downloading data:  31%|███       | 93.4M/300M [00:01<00:03, 62.4MB/s][A
+Downloading data:  33%|███▎      | 99.6M/300M [00:01<00:03, 61.5MB/s][A
+Downloading data:  35%|███▌      | 106M/300M [00:01<00:03, 60.3MB/s] [A
+Downloading data:  37%|███▋      | 112M/300M [00:01<00:03, 59.8MB/s][A
+Downloading data:  39%|███▉      | 118M/300M [00:01<00:03, 58.4MB/s][A
+Downloading data:  41%|████▏     | 124M/300M [00:02<00:03, 58.3MB/s][A
+Downloading data:  43%|████▎     | 130M/300M [00:02<00:02, 58.1MB/s][A
+Downloading data:  45%|████▌     | 135M/300M [00:02<00:02, 58.5MB/s][A
+Downloading data:  47%|████▋     | 142M/300M [00:02<00:02, 59.3MB/s][A
+Downloading data:  49%|████▉     | 148M/300M [00:02<00:02, 60.4MB/s][A
+Downloading data:  51%|█████▏    | 154M/300M [00:02<00:02, 61.1MB/s][A
+Downloading data:  54%|█████▎    | 161M/300M [00:02<00:02, 62.6MB/s][A
+Downloading data:  56%|█████▌    | 167M/300M [00:02<00:02, 61.4MB/s][A
+Downloading data:  58%|█████▊    | 173M/300M [00:02<00:02, 59.6MB/s][A
+Downloading data:  60%|█████▉    | 179M/300M [00:03<00:02, 59.3MB/s][A
+Downloading data:  62%|██████▏   | 185M/300M [00:03<00:01, 58.3MB/s][A
+Downloading data:  64%|██████▎   | 191M/300M [00:03<00:01, 56.3MB/s][A
+Downloading data:  66%|██████▌   | 197M/300M [00:03<00:01, 57.6MB/s][A
+Downloading data:  68%|██████▊   | 204M/300M [00:03<00:01, 60.1MB/s][A
+Downloading data:  70%|███████   | 210M/300M [00:03<00:01, 60.8MB/s][A
+Downloading data:  72%|███████▏  | 216M/300M [00:03<00:01, 62.0MB/s][A
+Downloading data:  74%|███████▍  | 223M/300M [00:03<00:01, 62.9MB/s][A
+Downloading data:  77%|███████▋  | 229M/300M [00:03<00:01, 61.2MB/s][A
+Downloading data:  79%|███████▊  | 235M/300M [00:03<00:01, 61.2MB/s][A
+Downloading data:  81%|████████  | 241M/300M [00:04<00:00, 59.7MB/s][A
+Downloading data:  83%|████████▎ | 247M/300M [00:04<00:00, 57.6MB/s][A
+Downloading data:  85%|████████▍ | 253M/300M [00:04<00:00, 57.8MB/s][A
+Downloading data:  87%|████████▋ | 259M/300M [00:04<00:00, 58.8MB/s][A
+Downloading data:  89%|████████▊ | 266M/300M [00:04<00:00, 60.1MB/s][A
+Downloading data:  91%|█████████ | 272M/300M [00:04<00:00, 59.8MB/s][A
+Downloading data:  93%|█████████▎| 278M/300M [00:04<00:00, 59.1MB/s][A
+Downloading data:  95%|█████████▍| 284M/300M [00:04<00:00, 59.2MB/s][A
+Downloading data:  97%|█████████▋| 290M/300M [00:04<00:00, 59.7MB/s][A
+Downloading data:  99%|█████████▉| 296M/300M [00:04<00:00, 60.1MB/s][ADownloading data: 100%|██████████| 300M/300M [00:05<00:00, 59.7MB/s]
+Downloading data files:  33%|███▎      | 1/3 [00:06<00:12,  6.16s/it]
+Downloading data:   0%|          | 0.00/16.4M [00:00<?, ?B/s][A
+Downloading data:  10%|█         | 1.71M/16.4M [00:00<00:00, 17.1MB/s][A
+Downloading data:  69%|██████▊   | 11.3M/16.4M [00:00<00:00, 63.3MB/s][ADownloading data: 100%|██████████| 16.4M/16.4M [00:00<00:00, 58.7MB/s]
+Downloading data files:  67%|██████▋   | 2/3 [00:07<00:03,  3.24s/it]
+Downloading data:   0%|          | 0.00/16.7M [00:00<?, ?B/s][A
+Downloading data:  10%|█         | 1.69M/16.7M [00:00<00:00, 16.9MB/s][A
+Downloading data:  67%|██████▋   | 11.3M/16.7M [00:00<00:00, 63.4MB/s][ADownloading data: 100%|██████████| 16.7M/16.7M [00:00<00:00, 59.1MB/s]
+Downloading data files: 100%|██████████| 3/3 [00:08<00:00,  2.31s/it]Downloading data files: 100%|██████████| 3/3 [00:08<00:00,  2.86s/it]
+Extracting data files:   0%|          | 0/3 [00:00<?, ?it/s]Extracting data files: 100%|██████████| 3/3 [00:00<00:00, 1273.45it/s]
+Generating train split:   0%|          | 0/204045 [00:00<?, ? examples/s]Generating train split:   5%|▍         | 10000/204045 [00:00<00:02, 71911.52 examples/s]Generating train split:  15%|█▍        | 30000/204045 [00:00<00:01, 93989.05 examples/s]Generating train split:  20%|█▉        | 40000/204045 [00:00<00:01, 95386.07 examples/s]Generating train split:  29%|██▉       | 60000/204045 [00:00<00:01, 95136.02 examples/s]Generating train split:  34%|███▍      | 70000/204045 [00:00<00:01, 92512.25 examples/s]Generating train split:  44%|████▍     | 90000/204045 [00:00<00:01, 93454.03 examples/s]Generating train split:  49%|████▉     | 100000/204045 [00:01<00:01, 91388.75 examples/s]Generating train split:  54%|█████▍    | 110000/204045 [00:01<00:01, 92913.49 examples/s]Generating train split:  64%|██████▎   | 130000/204045 [00:01<00:00, 94805.32 examples/s]Generating train split:  69%|██████▊   | 140000/204045 [00:01<00:00, 91808.21 examples/s]Generating train split:  74%|███████▎  | 150000/204045 [00:01<00:00, 93231.10 examples/s]Generating train split:  78%|███████▊  | 160000/204045 [00:01<00:00, 85506.89 examples/s]Generating train split:  83%|████████▎ | 170000/204045 [00:01<00:00, 88601.93 examples/s]Generating train split:  93%|█████████▎| 190000/204045 [00:02<00:00, 92862.35 examples/s]Generating train split: 100%|██████████| 204045/204045 [00:02<00:00, 92556.40 examples/s]                                                                                         Generating validation split:   0%|          | 0/11332 [00:00<?, ? examples/s]Generating validation split:  88%|████████▊ | 10000/11332 [00:00<00:00, 96494.43 examples/s]                                                                                            Generating test split:   0%|          | 0/11334 [00:00<?, ? examples/s]Generating test split:  88%|████████▊ | 10000/11334 [00:00<00:00, 87270.61 examples/s]                                                                                      Dataset parquet downloaded and prepared to /home/jay_agarwal_2022/.cache/huggingface/datasets/EdinburghNLP___parquet/EdinburghNLP--xsum-d3f384e48d78c019/0.0.0/2a3b91fbd88a2c90d1dbbb32b460cf621d31bd5b05b934492fdef7d8d6f236ec. Subsequent calls will reuse this data.
+  0%|          | 0/3 [00:00<?, ?it/s]100%|██████████| 3/3 [00:00<00:00, 272.05it/s]
+2026-04-18 21:44:05,892 - INFO - Train set size: 204045
+2026-04-18 21:44:05,893 - INFO - Validation set size: 11332
+2026-04-18 21:44:05,912 - INFO - Few-shot prompt (3 examples):
+2026-04-18 21:44:05,912 - INFO - Summarize the following article in one sentence.
+Article: Zuhair Kutbi's lawyer and son said half the sentence was suspended, but that he was also banned from writing for 15 years and travelling abroad for five, and fined $26,600 (Â£17,900).
+It is not clear on what charges Mr Kutbi was found guilty.
+He is believed to have been detained in July after saying Saudi Arabia should become a constitutional monarchy on TV.
+The 62-year-old is the latest in a string of human rights activists, reformists, ...
+2026-04-18 21:44:05,913 - INFO - Sampled 1000 validation indices.
+2026-04-18 21:44:05,913 - INFO - Loading model: Llama-2-7b-chat...
+Llama-2-7b-chat
+Traceback (most recent call last):
+  File "/home/jay_agarwal_2022/miniforge3/envs/se_probes/lib/python3.11/site-packages/huggingface_hub/utils/_errors.py", line 261, in hf_raise_for_status
+    response.raise_for_status()
+  File "/home/jay_agarwal_2022/miniforge3/envs/se_probes/lib/python3.11/site-packages/requests/models.py", line 1021, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url: https://huggingface.co/meta-llama/Llama-2-7b-chat-hf/resolve/main/tokenizer_config.json
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/jay_agarwal_2022/miniforge3/envs/se_probes/lib/python3.11/site-packages/transformers/utils/hub.py", line 430, in cached_file
+    resolved_file = hf_hub_download(
+                    ^^^^^^^^^^^^^^^^
+  File "/home/jay_agarwal_2022/miniforge3/envs/se_probes/lib/python3.11/site-packages/huggingface_hub/utils/_validators.py", line 118, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/jay_agarwal_2022/miniforge3/envs/se_probes/lib/python3.11/site-packages/huggingface_hub/file_download.py", line 1346, in hf_hub_download
+    raise head_call_error
+  File "/home/jay_agarwal_2022/miniforge3/envs/se_probes/lib/python3.11/site-packages/huggingface_hub/file_download.py", line 1232, in hf_hub_download
+    metadata = get_hf_file_metadata(
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jay_agarwal_2022/miniforge3/envs/se_probes/lib/python3.11/site-packages/huggingface_hub/utils/_validators.py", line 118, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/jay_agarwal_2022/miniforge3/envs/se_probes/lib/python3.11/site-packages/huggingface_hub/file_download.py", line 1608, in get_hf_file_metadata
+    hf_raise_for_status(r)
+  File "/home/jay_agarwal_2022/miniforge3/envs/se_probes/lib/python3.11/site-packages/huggingface_hub/utils/_errors.py", line 277, in hf_raise_for_status
+    raise GatedRepoError(message, response) from e
+huggingface_hub.utils._errors.GatedRepoError: 401 Client Error. (Request ID: Root=1-69e3adce-036005da714038ae1b7b1ad7;37f26a81-645e-4324-b500-dec1a341f7fe)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-2-7b-chat-hf/resolve/main/tokenizer_config.json.
+Access to model meta-llama/Llama-2-7b-chat-hf is restricted. You must have access to it and be authenticated to access it. Please log in.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/jay_agarwal_2022/SEP_Llama-3/run_qa_generation.py", line 306, in <module>
+    main()
+  File "/home/jay_agarwal_2022/SEP_Llama-3/run_qa_generation.py", line 214, in main
+    model = HuggingfaceModel(
+            ^^^^^^^^^^^^^^^^^
+  File "/home/jay_agarwal_2022/SEP_Llama-3/semantic_uncertainty/uncertainty/models/huggingface_models.py", line 115, in __init__
+    self.tokenizer = AutoTokenizer.from_pretrained(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jay_agarwal_2022/miniforge3/envs/se_probes/lib/python3.11/site-packages/transformers/models/auto/tokenization_auto.py", line 718, in from_pretrained
+    tokenizer_config = get_tokenizer_config(pretrained_model_name_or_path, **kwargs)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jay_agarwal_2022/miniforge3/envs/se_probes/lib/python3.11/site-packages/transformers/models/auto/tokenization_auto.py", line 550, in get_tokenizer_config
+    resolved_config_file = cached_file(
+                           ^^^^^^^^^^^^
+  File "/home/jay_agarwal_2022/miniforge3/envs/se_probes/lib/python3.11/site-packages/transformers/utils/hub.py", line 445, in cached_file
+    raise EnvironmentError(
+OSError: You are trying to access a gated repo.
+Make sure to request access at https://huggingface.co/meta-llama/Llama-2-7b-chat-hf and pass a token having permission to this repo either by logging in with `huggingface-cli login` or by passing `token=<your_token>`.

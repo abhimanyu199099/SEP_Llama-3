@@ -192,20 +192,29 @@ def load_ds(dataset_name, seed, add_options=None):
 
     elif dataset_name == "halueval_qa":
         # HaluEval QA — questions with a correct answer and supporting knowledge.
-        # We use 'knowledge' as context and 'right_answer' as the reference answer.
-        # The hallucinated_answer field is ignored here (not needed for generation).
-        dataset = datasets.load_dataset("pminervini/HaluEval", "qa_samples")
+        # We load the parquet directly via hf_hub_download because the datasets
+        # library loader for pminervini/HaluEval has a broken config (name=None).
+        # We use the 'qa/data' split which has separate right_answer / hallucinated_answer.
+        import pandas as pd
+        from huggingface_hub import hf_hub_download
         md5hash = lambda s: str(int(hashlib.md5(s.encode('utf-8')).hexdigest(), 16))
 
-        def reformat_halueval(x):
+        parquet_path = hf_hub_download(
+            repo_id="pminervini/HaluEval",
+            filename="qa/data-00000-of-00001.parquet",
+            repo_type="dataset",
+        )
+        df = pd.read_parquet(parquet_path)
+
+        def reformat_halueval(row):
             return {
-                'question': x['question'],
-                'answers': {'text': [x['answer']]},
-                'context': x.get('knowledge', ''),
-                'id': md5hash(x['question']),
+                'question': row['question'],
+                'answers': {'text': [row['right_answer']]},
+                'context': row.get('knowledge', ''),
+                'id': md5hash(row['question']),
             }
 
-        all_data = [reformat_halueval(d) for d in dataset["data"]]
+        all_data = [reformat_halueval(df.iloc[i]) for i in range(len(df))]
         split_ds = datasets.Dataset.from_list(all_data).train_test_split(
             test_size=0.2, seed=seed)
         train_dataset = split_ds['train']

@@ -1,58 +1,86 @@
-# Semantic Entropy Probes (SEP) for Llama-3 Hallucination Detection
+# Semantic Entropy Probes with Head-Adaptive Lookback Gating
 
 [![arXiv](https://img.shields.io/badge/arXiv-2406.15927-b31b1b.svg)](https://arxiv.org/abs/2406.15927)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-red.svg)](https://pytorch.org/get-started/locally/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-This repository implements **Semantic Entropy Probes (SEPs)** for **Meta-Llama-3-8B-Instruct**, providing a complete pipeline to detect hallucinations in abstractive summarization using the [XSum](https://huggingface.co/datasets/xsum) dataset.
+This repository implements **Semantic Entropy Probes (SEPs)** combined with **Lookback Ratio head-adaptive gating** for hallucination detection and causal validation in Large Language Models, using `meta-llama/Llama-2-7b-chat-hf`.
 
-Adapted from the original [OATML/semantic-entropy-probes](https://github.com/OATML/semantic-entropy-probes) repository, modernized to support Llama-3, FP16 precision, and Hugging Face gated model access.
+The pipeline supports multiple datasets: **SQuAD**, **TriviaQA**, **NQ**, **BioASQ** (QA), **XSum** (abstractive summarization), and **HaluEval QA** (context-grounded QA).
 
-## Objective
+Adapted from [OATML/semantic-entropy-probes](https://github.com/OATML/semantic-entropy-probes), extended with multi-dataset support, Lookback Ratio gating, SEP-modulated inference, and causal ablation experiments.
 
-Large Language Models (LLMs) often hallucinate -- producing fluent but factually incorrect text. This project distinguishes between **Confident** (accurate) and **Confused** (hallucinated) generations by measuring **Semantic Entropy** (consistency across multiple stochastic samples) and training a linear probe on the model's hidden states to predict this uncertainty.
+---
 
-SEPs approximate semantic entropy from a single forward pass through the model's hidden states, eliminating the need for multi-sampling at inference time and reducing computational overhead to near zero.
+## Overview
+
+Large Language Models hallucinate — producing fluent but factually incorrect text. This project addresses the problem at two levels:
+
+1. **Detection**: Train a linear probe on a single-forward-pass hidden state to predict semantic uncertainty (hallucination risk) without multi-sampling at inference time.
+2. **Causal Validation**: Use a Lookback Ratio gate (triggered by the probe) to demonstrate that certain attention heads *causally* drive hallucinated outputs, via knockout and blindness ablation tests.
+
+### Key Components
+
+- **Semantic Entropy Probe (SEP)**: Logistic regression on the TBG (Token Before Generation) or SLT (Second-to-Last Token) hidden state. Trained on semantic entropy labels derived from NLI clustering of 10 stochastic generations. Predicts hallucination risk in a single forward pass (near-zero overhead).
+- **Lookback Ratio (LR)**: Per-head metric measuring how much each attention head attends to the input context vs. self-generated tokens. High LR = context-grounded; low LR = self-referential / drifting.
+- **SEP-Modulated Gate**: At inference time, if the probe scores a sample as uncertain (`sep_score > threshold`), a sigmoid gate modulated by the probe score suppresses low-LR heads:
+  ```
+  gate_shape = sigmoid((LR - cutoff) × α)
+  gate = sep_score × gate_shape + (1 − sep_score)
+  ```
+  This blends between no-op (when the probe is confident) and full gating (when the probe is maximally uncertain), preventing over-suppression on borderline samples.
+
+---
 
 ## Pipeline Architecture
 
-The pipeline consists of four sequential stages:
+The pipeline runs in **7 sequential stages**:
 
 ```
-XSum Documents
-      |
-      v
-[1. Generation]         run_xsum_generation.py
-      |                   - 5 stochastic summaries per document (T=0.7)
-      |                   - Output: sep_xsum_generations.pkl
-      v
-[2. Labeling]           compute_rouge_labels.py
-      |                   - Pairwise Rouge-L overlap scoring
-      |                   - Label 0 (Confident): Rouge-L > 0.7
-      |                   - Label 1 (Hallucinated): Rouge-L < 0.3
-      |                   - Output: sep_filtered_labels.json
-      v
-[3. Feature Extraction] extract_features.py
-      |                   - Prompt-only forward pass
-      |                   - Last-token hidden state from final layer
-      |                   - Output: sep_dataset.pt
-      v
-[4. Probe Training]     train_probe.py
-                          - Logistic Regression on hidden states
-                          - 80/20 train/test split with StandardScaler
-                          - Reports Accuracy and AUROC
+Multi-dataset Inputs
+        |
+        v
+[1. Generation]          run_qa_generation.py
+        |                  - 10 stochastic answers per question (T=1.0)
+        |                  - 1 greedy answer per question (T=0.1)
+        |                  - Output: output/{dataset}/generations.pkl
+        v
+[2. NLI Labels]          compute_nli_labels.py
+        |                  - DeBERTa-v2-XL NLI clustering across 10 generations
+        |                  - Semantic entropy → binary hallucination label
+        |                  - Output: output/{dataset}/nli_labels.pkl
+        v
+[3. Feature Extraction]  extract_all_layers.py
+        |                  - Greedy forward pass per sample
+        |                  - TBG & SLT hidden states from all 32 layers
+        |                  - Output: output/{dataset}/sep_dataset_all_layers.pt
+        v
+[4. ID Probe Training]   train_probe.py --mode id
+        |                  - Logistic regression on TBG/SLT hidden states
+        |                  - 80/20 train/test split with StandardScaler
+        |                  - Reports per-layer Accuracy and AUROC
+        |                  - Output: output/{dataset}/sep_probe_{TBG|SLT}.pkl
+        v
+[5. OOD Matrix]          train_probe.py --mode matrix
+        |                  - Cross-dataset AUROC: train on one, eval on all others
+        |                  - Output: printed matrix + output/logs/probe_matrix.log
+        v
+[6. Gated Inference]     inference_with_gate.py
+        |                  - Loads saved probe (Stage 4)
+        |                  - Scores each sample; triggers SEP-modulated LR gate
+        |                  - Compares original vs. gated answer accuracy
+        |                  - Output: output/{dataset}/gated_results.pkl
+        v
+[7. Causal Validation]   causal_validation.py
+                           - Test 1 Knockout: on SEP-triggered samples —
+                             original vs. soft-gate vs. hard-zero accuracy
+                           - Test 2 Blindness: on passthrough samples —
+                             zero high-LR (grounding) heads → expect accuracy drop
+                           - Output: output/{dataset}/causal_validation.pkl
 ```
 
-### Stage Details
-
-**1. Generation (`run_xsum_generation.py`)** -- Samples 1,000 documents from XSum and generates 5 stochastic summaries per document using `Meta-Llama-3-8B-Instruct` at Temperature 0.7. Uses the OATML `HuggingfaceModel` wrapper for inference. Saves results incrementally every 100 samples.
-
-**2. Labeling (`compute_rouge_labels.py`)** -- Measures semantic consistency via pairwise Rouge-L F1 scores across the 5 generations. Samples with high agreement (> 0.7) are labeled Confident (0); those with low agreement (< 0.3) are labeled Hallucinated (1). Ambiguous samples are discarded.
-
-**3. Feature Extraction (`extract_features.py`)** -- Performs a prompt-only forward pass on each filtered sample and extracts the hidden state of the last token from the final transformer layer (dimension 4096 for Llama-3-8B). Saves features and labels as a PyTorch tensor file.
-
-**4. Probe Training (`train_probe.py`)** -- Trains an L2-regularized Logistic Regression classifier (via scikit-learn) on the extracted hidden states. Features are normalized with `StandardScaler`. Outputs a classification report with per-class precision/recall and AUROC score.
+---
 
 ## Installation & Setup
 
@@ -60,102 +88,171 @@ XSum Documents
 
 - Python 3.10+
 - PyTorch with CUDA support
-- GPU with at least 24 GB VRAM (for FP16 inference of the 8B model)
-- Access to [Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) on Hugging Face (gated model)
+- GPU with at least 24 GB VRAM (FP16 inference of Llama-2-7b-chat)
+- Access to [meta-llama/Llama-2-7b-chat-hf](https://huggingface.co/meta-llama/Llama-2-7b-chat-hf) (gated model)
 
 ### Install Dependencies
-
-```bash
-pip install torch transformers datasets rouge-score scikit-learn accelerate matplotlib
-```
-
-Or use the provided conda environment:
 
 ```bash
 conda env update -f sep_enviroment.yaml
 conda activate se_probes
 ```
 
-### Authenticate with Hugging Face
+Or manually:
 
-Llama-3 is a gated model. You must accept the license agreement and authenticate:
+```bash
+pip install torch transformers datasets rouge-score scikit-learn accelerate matplotlib scipy
+```
+
+### Authenticate with Hugging Face
 
 ```bash
 huggingface-cli login
+export HF_HUB_CACHE=/path/to/your/hf_cache
 ```
+
+---
 
 ## Usage
 
 ### Run the Full Pipeline
 
-The generation step is the most time-consuming (~2 hours for 1,000 samples on an A100). Run everything sequentially:
-
 ```bash
-nohup sh -c "python run_xsum_generation.py && python compute_rouge_labels.py && python extract_features.py && python train_probe.py" > pipeline.log 2>&1 &
+# All QA datasets (squad, trivia_qa, nq, bioasq)
+nohup bash run_pipeline.sh > pipeline_qa.log 2>&1 &
+
+# XSum only
+nohup bash run_pipeline.sh xsum > pipeline_xsum.log 2>&1 &
+
+# Specific datasets
+bash run_pipeline.sh squad trivia_qa
 ```
 
-Monitor progress:
+The script waits for Stage 1 generation logs before proceeding — generation can be launched separately on multiple GPUs in parallel.
+
+### Step-by-Step
 
 ```bash
-tail -f pipeline.log
+# 1. Generate stochastic answers / summaries
+python run_qa_generation.py --dataset squad
+# Output: output/squad/generations.pkl
+
+# 2. Compute NLI-based semantic entropy labels
+python compute_nli_labels.py --dataset squad
+# Output: output/squad/nli_labels.pkl
+
+# 3. Extract hidden-state features (all layers)
+python extract_all_layers.py --dataset squad
+# Output: output/squad/sep_dataset_all_layers.pt
+
+# 4. Train ID probe and save it
+python train_probe.py --mode id --dataset squad --save_probe
+# Output: output/squad/sep_probe_TBG.pkl, sep_probe_SLT.pkl
+
+# 5. Cross-dataset OOD matrix
+python train_probe.py --mode matrix
+# Prints AUROC matrix for all datasets
+
+# 6. Gated inference with SEP-modulated Lookback gate
+python inference_with_gate.py --dataset squad --alpha 10.0 --sep_threshold 0.5
+# Output: output/squad/gated_results.pkl
+
+# 7. Causal validation
+python causal_validation.py --dataset squad --num_samples 100
+# Output: output/squad/causal_validation.pkl
 ```
 
-### Step-by-Step Execution
+### Generate Figures
 
 ```bash
-# 1. Generate stochastic summaries
-python run_xsum_generation.py
-# Output: sep_xsum_generations.pkl
-
-# 2. Compute uncertainty labels via Rouge-L
-python compute_rouge_labels.py
-# Output: sep_filtered_labels.json
-
-# 3. Extract hidden state features
-python extract_features.py
-# Output: sep_dataset.pt
-
-# 4. Train and evaluate the probe
-python train_probe.py
-# Output: Classification report and AUROC printed to stdout
+python generate_figures.py
+# Outputs poster-quality PNGs to output/figures/
 ```
+
+Produces:
+- **Figure 2**: Cross-dataset AUROC heatmap (OOD/ID generalization)
+- **Figure 3**: SEP score distributions — Correct vs. Hallucinated
+- **Figure 4**: Accuracy before/after gating (XSum + HaluEval)
+- **Figure 5**: Causal validation — Original / Soft Gate / Hard Knockout per dataset
+
+---
 
 ## Project Structure
 
 ```
-semantic-entropy-probes/
-├── run_xsum_generation.py          # Stage 1: Stochastic generation on XSum
-├── compute_rouge_labels.py         # Stage 2: Rouge-L labeling
-├── extract_features.py             # Stage 3: Hidden state extraction
-├── train_probe.py                  # Stage 4: Logistic regression probe
-├── sep_utils.py                    # Shared utilities (prompt formatting, logging)
-├── sep_enviroment.yaml             # Conda environment specification
-├── semantic_uncertainty/           # Core library (forked from OATML)
-│   ├── generate_answers.py         #   Multi-dataset answer generation
-│   ├── compute_uncertainty_measures.py  #   Semantic entropy computation
-│   ├── analyze_results.py          #   Aggregate metrics
-│   └── uncertainty/                #   Model wrappers, data utils, measures
-│       ├── models/                 #     HuggingFace model interface
-│       ├── data/                   #     Dataset loaders (TriviaQA, SQuAD, etc.)
-│       └── uncertainty_measures/   #     SE, p_ik, p_true implementations
-├── semantic_entropy_probes/        # Original SEP notebook and pre-trained models
-│   └── train-latent-probe.ipynb    #   Interactive probe training notebook
-├── slurm/
-│   └── run.sh                      # SLURM batch job script
-└── LICENSE
+SEP_Llama-3/
+├── run_qa_generation.py         # Stage 1: Stochastic generation (QA + XSum)
+├── compute_nli_labels.py        # Stage 2: DeBERTa NLI semantic entropy labels
+├── extract_all_layers.py        # Stage 3: TBG/SLT hidden states, all 32 layers
+├── train_probe.py               # Stage 4/5: ID probe training + OOD matrix
+├── inference_with_gate.py       # Stage 6: SEP-triggered LR-gated inference
+├── causal_validation.py         # Stage 7: Knockout + Blindness ablation tests
+├── generate_figures.py          # Poster/report figure generation
+├── common_utils.py              # Shared constants and dataset configs
+├── run_pipeline.sh              # Orchestrates all 7 stages
+├── sep_enviroment.yaml          # Conda environment
+├── semantic_uncertainty/        # Core library (adapted from OATML)
+│   ├── generate_answers.py
+│   ├── compute_uncertainty_measures.py
+│   └── uncertainty/
+│       ├── models/              # HuggingFace model wrappers
+│       ├── data/                # Dataset loaders (SQuAD, TriviaQA, NQ, BioASQ, HaluEval, XSum)
+│       └── uncertainty_measures/  # Semantic entropy, p_ik, p_true
+├── output/
+│   ├── {dataset}/               # Per-dataset outputs (pkl, pt, probe pkl)
+│   ├── figures/                 # Generated PNGs
+│   └── logs/                    # Stage logs
+└── slurm/
+    └── run.sh                   # SLURM batch job script
 ```
 
-## Key Modifications for Llama-3
+---
 
-- **Precision**: Enforced `torch.float16` to fit the 8B parameter model on consumer GPUs (24 GB VRAM).
-- **Prompt Formatting**: `sep_utils.py` handles Llama-3's specific `<|begin_of_text|>`, `<|start_header_id|>`, and `<|eot_id|>` special token structure, ensuring identical formatting across generation and feature extraction.
-- **Task**: Abstractive summarization on XSum, extending the original QA-focused pipeline.
-- **Labeling**: Rouge-L-based proxy for semantic entropy, replacing the entailment-based clustering used in the original paper.
-- **Error Handling**: Robust handling of empty generations and token limit overflows during generation.
+## Datasets
+
+| Dataset | Type | Samples | Generations | Accuracy Metric |
+|---------|------|---------|-------------|-----------------|
+| SQuAD | Extractive QA | 2,000 | 10 | Token-F1 ≥ 0.5 |
+| TriviaQA | Open-domain QA | 2,000 | 10 | Token-F1 ≥ 0.5 |
+| NQ | Open-domain QA | 2,000 | 10 | Token-F1 ≥ 0.5 |
+| BioASQ | Biomedical QA | 2,000 | 10 | Token-F1 ≥ 0.5 |
+| XSum | Summarization | 1,000 | 5 | ROUGE-L ≥ 0.2 |
+| HaluEval QA | Context QA | 2,000 | 10 | Token-F1 ≥ 0.5 |
+
+---
+
+## Key Design Decisions
+
+**Average-normalized Lookback Ratio**: The LR is computed as average per-token attention mass, not total sum. On long XSum articles (500+ prompt tokens), sum-based LR is trivially high (~0.9) and the gate never fires. Average-based LR (~0.15–0.36) makes the gate responsive.
+
+**SEP-modulated blend**: Rather than scaling the sigmoid's sharpness (which doesn't change which heads fire), the gate shape is blended linearly with a pass-through using the probe's uncertainty score. This reduces collateral suppression on borderline samples.
+
+**XSum as LR testbed**: Lookback Ratio requires multiple generated tokens (50–100) to observe attention drift between context and generation. QA answers are 1–5 tokens — the gate fires too late to have an effect. XSum is the correct dataset for this experiment.
+
+**Causal validation over mitigation**: The primary contribution of the gating experiment is not accuracy improvement but *causal attribution*. Test 1 (soft gate 49% > hard knockout 42% on triggered samples) and Test 2 (zeroing grounding heads degrades passthrough accuracy) together demonstrate that the probe identifies causally relevant heads, not noise.
+
+---
+
+## Results Summary
+
+| Dataset | ID AUROC | OOD/ID Ratio |
+|---------|----------|--------------|
+| SQuAD | ~0.70 | ~0.86 |
+| TriviaQA | ~0.72 | ~0.85 |
+| NQ | ~0.68 | ~0.87 |
+| HaluEval | ~0.74 | ~0.86 |
+
+*Exact values from `probe_matrix.log` after running Stage 5.*
+
+**Causal Validation (XSum):**
+- Test 1 Knockout: Original 42% → Soft Gate 49% → Hard Zero 42%
+- Test 2 Blindness: Zeroing high-LR heads degrades passthrough accuracy, confirming causal role
+
+---
 
 ## Credits
 
-Based on the paper:
+Based on:
 
 > **Semantic Entropy Probes: Robust and Cheap Hallucination Detection in LLMs**
 > Jannik Kossen, Jiatong Han, Muhammed Razzak, Lisa Schut, Shreshth Malik, Yarin Gal

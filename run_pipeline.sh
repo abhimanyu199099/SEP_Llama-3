@@ -84,12 +84,36 @@ for ds in "${DATASETS[@]}"; do
 done
 
 # ---- Stage 4: ID Evaluation ----
+# STRATEGY controls which probe strategy is trained and saved.
+# STRATEGIES is an ordered list: the last one whose probe is saved becomes the
+# active probe used by stage 6 (inference_with_gate.py).  Default: all four.
+# Override: STRATEGY=concat bash run_pipeline.sh
+#           STRATEGIES="hard_vote soft_vote" bash run_pipeline.sh squad
+STRATEGY=${STRATEGY:-""}
+if [ -n "$STRATEGY" ]; then
+    STRATEGIES=("$STRATEGY")
+else
+    STRATEGIES=("concat" "hard_vote" "soft_vote" "meta")
+fi
+TOP_K=${TOP_K:-10}
+
 echo ""
 echo "=== STAGE 4: In-Distribution Evaluation ==="
+echo "Strategies: ${STRATEGIES[*]}  top_k=$TOP_K"
 for ds in "${DATASETS[@]}"; do
-    echo "[$(date)] Training hidden-state ID probe for $ds..."
-    $PYTHON train_probe.py --mode id --dataset "$ds" --save_probe 2>&1 | tee "$LOG_DIR/probe_id_${ds}.log"
-    echo ""
+    for strat in "${STRATEGIES[@]}"; do
+        top_k_arg="--top_k $TOP_K"
+        # meta uses all layers — top_k is ignored but harmless to pass
+        echo "[$(date)] Training probe for $ds  strategy=$strat ..."
+        $PYTHON train_probe.py \
+            --mode id \
+            --dataset "$ds" \
+            --strategy "$strat" \
+            $top_k_arg \
+            --save_probe \
+            2>&1 | tee "$LOG_DIR/probe_id_${ds}_${strat}.log"
+        echo ""
+    done
 done
 
 # ---- Stage 5: Cross-Dataset OOD Matrix ----

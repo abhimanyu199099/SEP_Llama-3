@@ -231,7 +231,7 @@ class HuggingfaceModel(BaseModel):
         self.token_limit = 4096 if 'Llama-2' in model_name else 2048
 
     
-    def predict(self, input_data, temperature, return_full=False, return_latent=False, return_attention=False, formatted=True):
+    def predict(self, input_data, temperature, return_full=False, return_latent=False, return_attention=False, formatted=True, context_token_span=None):
 
         if not formatted:
             input_data = self.tokenizer.apply_chat_template(...)
@@ -403,6 +403,12 @@ class HuggingfaceModel(BaseModel):
         lookback_ratio = None
         if return_attention and outputs.attentions is not None:
             n_input_token_lb = inputs['input_ids'].shape[1]
+            # context_token_span = (c_start, c_end) restricts the numerator to
+            # the retrieved context tokens only.  Falls back to full prompt when None.
+            if context_token_span is not None:
+                c_start, c_end = context_token_span
+            else:
+                c_start, c_end = 0, n_input_token_lb
             # outputs.attentions: tuple[T] of tuple[L] of Tensor(B, H, q, kv)
             # T = number of generation steps, L = num_layers
             num_layers_attn = len(outputs.attentions[0])
@@ -420,9 +426,9 @@ class HuggingfaceModel(BaseModel):
                     # Step 0 has q_len = full sequence; step > 0 has q_len = 1 (KV cache)
                     attn = layer_attn[0]          # (num_heads, q_len, kv_len)
                     attn_row = attn[:, -1, :]     # last query = current generated token: (heads, kv_len)
-                    context_sum = attn_row[:, :n_input_token_lb].sum(-1)   # (heads,)
-                    total_sum   = attn_row.sum(-1).clamp(min=1e-10)        # (heads,)
-                    layer_ratios.append((context_sum / total_sum).cpu())   # (heads,)
+                    context_sum = attn_row[:, c_start:c_end].sum(-1)      # (heads,)
+                    total_sum   = attn_row.sum(-1).clamp(min=1e-6)         # (heads,)
+                    layer_ratios.append((context_sum / total_sum).cpu())  # (heads,)
                 lookback_sum += torch.stack(layer_ratios)  # (num_layers, num_heads)
                 valid_steps += 1
             if valid_steps > 0:

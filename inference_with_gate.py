@@ -71,6 +71,7 @@ from common_utils import (
     MODEL_NAME, ALL_DATASETS, XSUM_DATASETS, OUTPUT_BASE,
     MAX_NEW_TOKENS, XSUM_MAX_NEW_TOKENS, XSUM_ACC_THRESHOLD,
 )
+from train_probe import score_from_bundle
 
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -104,10 +105,10 @@ class LookbackGatedAttention:
         'zero_low'  → gate = 0 where LR < cutoff, else 1   [hard suppress]
     """
 
-    def __init__(self, model, context_length=0, alpha=10.0, lr_cutoff=0.5,
+    def __init__(self, model, context_span=(0, 0), alpha=10.0, lr_cutoff=0.5,
                  gate_mode='soft', layer_range=None):
-        self.triggered      = False
-        self.context_length = context_length
+        self.triggered    = False
+        self.context_span = context_span  # (c_start, c_end) token indices of retrieved context
         self.alpha          = alpha
         self.lr_cutoff      = lr_cutoff
         self.gate_mode      = gate_mode
@@ -224,11 +225,11 @@ class LookbackGatedAttention:
             # attn_output: (B=1, num_heads, q_len=1, head_dim)
 
             # ===== FIX 1 + FIX 2: gate here, BEFORE o_proj ===== #
-            ctx       = controller.context_length
-            attn_row  = attn_weights[0, :, -1, :]           # (H, kv_len)
-            attn_ctx  = attn_row[:, :ctx].sum(-1)            # (H,) prompt attn
-            attn_new  = attn_row[:, ctx:].sum(-1)            # (H,) generated attn
-            lr        = attn_ctx / (attn_ctx + attn_new + 1e-10)   # (H,) ∈ [0,1]
+            c_start, c_end = controller.context_span
+            attn_row  = attn_weights[0, :, -1, :]                    # (H, kv_len)
+            attn_ctx  = attn_row[:, c_start:c_end].sum(-1)           # (H,) retrieved context attn
+            attn_total = attn_row.sum(-1).clamp(min=1e-6)             # (H,)
+            lr        = attn_ctx / attn_total                         # (H,) ∈ [0,1]
 
             mode   = controller.gate_mode
             cutoff = controller.lr_cutoff
@@ -447,12 +448,10 @@ def main():
     with open(probe_file, "rb") as f:
         probe_bundle = pickle.load(f)
 
-    clf       = probe_bundle['clf']
-    r_start   = probe_bundle['r_start']
-    r_end     = probe_bundle['r_end']
     se_thresh = probe_bundle['threshold']
+    p_strategy = probe_bundle.get('strategy', 'concat')
 
-    logging.info(f"Probe: layers [{r_start},{r_end}), SE threshold={se_thresh:.4f}")
+    logging.info(f"Probe: strategy={p_strategy}, SE threshold={se_thresh:.4f}")
     logging.info(f"Gate trigger: SEP uncertainty > {args.sep_threshold}")
 
     # ---- Parse custom layer range ----
@@ -489,12 +488,8 @@ def main():
             valid_items.append(False)
             continue
 
-        emb_sq  = emb.squeeze(1) if emb.dim() == 3 else emb
-        feature = np.concatenate(
-            [emb_sq[l].numpy() for l in range(r_start, r_end)], axis=0
-        )[np.newaxis, :]
-
-        score = clf.predict_proba(feature)[0, 1]
+        emb_sq = emb.squeeze(1) if emb.dim() == 3 else emb
+        score  = score_from_bundle(probe_bundle, emb_sq)
         sep_scores.append(score)
         valid_items.append(True)
 
@@ -513,7 +508,7 @@ def main():
     # (no-ops until controller.trigger() is called)
     controller = LookbackGatedAttention(
         model=raw_model,
-        context_length=0,
+        context_span=(0, 0),
         alpha=args.alpha,
         lr_cutoff=args.lr_cutoff,
         gate_mode=args.gate_mode,
@@ -567,7 +562,21 @@ def main():
                 tokenizer=tokenizer,
             )])
 
-            controller.context_length = n_prompt_tokens
+            # Restrict lookback ratio numerator to retrieved context tokens only.
+            context = item.get('context') or ''
+            context_span = (0, n_prompt_tokens)  # fallback: full prompt
+            if context.strip():
+                ctx_pos = prompt.find(context)
+                if ctx_pos != -1:
+                    prefix_ids  = tokenizer(prompt[:ctx_pos],
+                                            add_special_tokens=False)['input_ids']
+                    context_ids = tokenizer(context,
+                                            add_special_tokens=False)['input_ids']
+                    c_start = len(prefix_ids)
+                    c_end   = c_start + len(context_ids)
+                    context_span = (c_start, c_end)
+
+            controller.context_span = context_span
             controller.trigger()
 
             try:
@@ -622,7 +631,7 @@ def main():
     print(f"GATED INFERENCE RESULTS — {dataset}")
     print(f"{'='*65}")
     print(f"Model:             {MODEL_NAME}")
-    print(f"SEP probe:         {args.token_type}  (layers [{r_start},{r_end}))")
+    print(f"SEP probe:         {args.token_type}  (layer_range={args.layer_range or 'upper third'})")
     print(f"Gate trigger:      SEP score > {args.sep_threshold}")
     if args.gate_mode == 'soft':
         print(f"Gate formula:      sigmoid((LR - {args.lr_cutoff}) * {args.alpha})")

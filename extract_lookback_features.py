@@ -38,7 +38,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "semantic_uncertainty"))
 
 from uncertainty.models.huggingface_models import HuggingfaceModel
 from common_utils import (
-    MODEL_NAME, QA_DATASETS, OUTPUT_BASE,
+    MODEL_NAME, ALL_DATASETS, OUTPUT_BASE,
     TEMPERATURE_LOW, MAX_NEW_TOKENS,
 )
 
@@ -50,8 +50,8 @@ logging.basicConfig(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Extract Lookback Ratio features")
-    parser.add_argument("--dataset", required=True, choices=QA_DATASETS,
-                        help="QA dataset name")
+    parser.add_argument("--dataset", required=True, choices=ALL_DATASETS,
+                        help="Dataset name")
     parser.add_argument("--batch_size", type=int, default=1,
                         help="Samples to process before flushing GPU cache (default: 1)")
     parser.add_argument("--checkpoint_every", type=int, default=100,
@@ -108,11 +108,27 @@ def main():
         prompt     = gen_item['prompt_used']
 
         try:
+            # Compute context token span so the lookback ratio numerator
+            # covers only the retrieved context, not the full prompt.
+            context = gen_item.get('context') or ''
+            context_token_span = None
+            if context.strip():
+                ctx_pos = prompt.find(context)
+                if ctx_pos != -1:
+                    prefix_ids  = model.tokenizer(
+                        prompt[:ctx_pos], add_special_tokens=False)['input_ids']
+                    context_ids = model.tokenizer(
+                        context, add_special_tokens=False)['input_ids']
+                    c_start = len(prefix_ids)
+                    c_end   = c_start + len(context_ids)
+                    context_token_span = (c_start, c_end)
+
             _, _, _, lookback_ratio = model.predict(
                 prompt,
                 temperature=TEMPERATURE_LOW,
                 return_latent=False,
                 return_attention=True,
+                context_token_span=context_token_span,
             )
             # lookback_ratio: (num_layers, num_heads) or None
             if lookback_ratio is None:

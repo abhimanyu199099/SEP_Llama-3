@@ -3,11 +3,23 @@
 Modes:
   id     -- In-distribution evaluation on a single dataset
   ood    -- Train on one dataset, evaluate on another
-  matrix -- Full 4x4 cross-dataset AUROC matrix
+  matrix -- Full N×N cross-dataset PR-AUC matrix
+
+Strategies (--strategy, hidden-state probes only):
+  concat     -- Concatenate top-k layer features, single logistic regression
+  hard_vote  -- Per-layer probe on each top-k layer, majority vote
+  soft_vote  -- Per-layer probe on each top-k layer, averaged probabilities
+  meta       -- Per-layer probes on ALL layers; stack their output probs as
+                features for a second logistic regression (meta-probe)
+
+All logistic regressions use class_weight='balanced'.
+Layer selection ranks layers by PR AUC (instead of AUROC).
 
 Usage:
     python train_probe.py --mode id --dataset squad
     python train_probe.py --mode id --dataset squad --save_probe
+    python train_probe.py --mode id --dataset squad --strategy hard_vote --top_k 8
+    python train_probe.py --mode id --dataset squad --strategy meta
     python train_probe.py --mode ood --train_dataset squad --eval_dataset trivia_qa
     python train_probe.py --mode matrix
 """
@@ -18,18 +30,20 @@ import argparse
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
+from sklearn.metrics import (
+    accuracy_score, roc_auc_score, classification_report,
+    average_precision_score, f1_score, recall_score, precision_score,
+)
 import logging
 
-from common_utils import QA_DATASETS, OUTPUT_BASE, MODEL_NAME, NLI_MODEL
+from common_utils import ALL_DATASETS, QA_DATASETS, OUTPUT_BASE, MODEL_NAME, NLI_MODEL
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Semantic Entropy Probes")
-    parser.add_argument("--mode", choices=["id", "ood", "matrix"], default="id",
-                        help="Evaluation mode")
+    parser.add_argument("--mode", choices=["id", "ood", "matrix"], default="id")
     parser.add_argument("--dataset", type=str, default=None,
                         help="Dataset for ID mode")
     parser.add_argument("--train_dataset", type=str, default=None,
@@ -37,66 +51,117 @@ def parse_args():
     parser.add_argument("--eval_dataset", type=str, default=None,
                         help="Evaluation dataset for OOD mode")
     parser.add_argument("--feature_type", choices=["hidden", "lookback"], default="hidden",
-                        help="'hidden' = TBG/SLT per-layer embeddings (default); "
-                             "'lookback' = Lookback Lens attention-head ratio features")
+                        help="'hidden' = TBG/SLT embeddings; 'lookback' = Lookback Ratio features")
+    parser.add_argument("--strategy",
+                        choices=["concat", "hard_vote", "soft_vote", "meta"],
+                        default="concat",
+                        help="Probe strategy for hidden-state features (default: concat)")
+    parser.add_argument("--top_k", type=int, default=10,
+                        help="Number of top layers to select by PR AUC (default: 10)")
     parser.add_argument("--save_probe", action="store_true",
-                        help="Save the trained TBG+SLT probes to output/{dataset}/sep_probe_*.pkl "
-                             "(used by inference_with_gate.py). Only applies in ID mode.")
+                        help="Save trained probe to output/{dataset}/sep_probe_*.pkl "
+                             "(ID mode only, used by inference_with_gate.py)")
     return parser.parse_args()
 
 
 # ============================================================
-# Core utilities (unchanged from previous version)
+# Shared metrics helper
+# ============================================================
+
+def compute_metrics(y_true, y_pred, y_prob):
+    """Return a dict of classification metrics."""
+    return {
+        'auroc':     roc_auc_score(y_true, y_prob),
+        'pr_auc':    average_precision_score(y_true, y_prob),
+        'f1':        f1_score(y_true, y_pred, zero_division=0),
+        'recall':    recall_score(y_true, y_pred, zero_division=0),
+        'precision': precision_score(y_true, y_pred, zero_division=0),
+        'accuracy':  accuracy_score(y_true, y_pred),
+    }
+
+
+def print_metrics(metrics, indent=2):
+    pad = ' ' * indent
+    print(f"{pad}AUROC:     {metrics['auroc']:.4f}")
+    print(f"{pad}PR AUC:    {metrics['pr_auc']:.4f}")
+    print(f"{pad}F1:        {metrics['f1']:.4f}")
+    print(f"{pad}Recall:    {metrics['recall']:.4f}")
+    print(f"{pad}Precision: {metrics['precision']:.4f}")
+    print(f"{pad}Accuracy:  {metrics['accuracy']:.4f}")
+
+
+# ============================================================
+# Probe scoring (used by inference_with_gate.py via saved bundle)
+# ============================================================
+
+def score_from_bundle(bundle, emb_sq):
+    """Score one embedding against a saved probe bundle.
+
+    Args:
+        bundle:  dict loaded from sep_probe_*.pkl
+        emb_sq:  Tensor (num_layers, hidden_dim) — squeezed TBG or SLT embedding
+
+    Returns:
+        float probability of hallucination ∈ [0, 1]
+    """
+    strategy = bundle.get('strategy', 'concat')
+
+    if strategy == 'concat':
+        layer_indices = bundle['layer_indices']
+        feat = np.concatenate(
+            [emb_sq[l].numpy() for l in layer_indices], axis=0
+        )[np.newaxis, :]
+        return float(bundle['clf'].predict_proba(feat)[0, 1])
+
+    elif strategy in ('hard_vote', 'soft_vote'):
+        layer_probes = bundle['layer_probes']
+        probs = np.array([
+            clf.predict_proba(emb_sq[l].numpy()[np.newaxis, :])[0, 1]
+            for l, clf in layer_probes
+        ])
+        if strategy == 'hard_vote':
+            return float((probs >= 0.5).mean())
+        return float(probs.mean())
+
+    elif strategy == 'meta':
+        layer_probes = bundle['layer_probes']
+        probs = np.array([
+            clf.predict_proba(emb_sq[l].numpy()[np.newaxis, :])[0, 1]
+            for l, clf in layer_probes
+        ])
+        return float(bundle['meta_clf'].predict_proba(probs[np.newaxis, :])[0, 1])
+
+    raise ValueError(f"Unknown probe strategy: {strategy}")
+
+
+# ============================================================
+# Core utilities
 # ============================================================
 
 def best_split(entropy):
-    """
-    OATML best_split: find threshold minimizing sum-of-squared reconstruction
-    error (1D k-means with k=2).
-    """
+    """1D k-means (k=2): find threshold minimising within-cluster MSE."""
     ents = entropy.numpy() if isinstance(entropy, torch.Tensor) else entropy
     splits = np.linspace(1e-10, ents.max(), 100)
-    best_mse = np.inf
-    best_threshold = splits[0]
-
+    best_mse, best_threshold = np.inf, splits[0]
     for split in splits:
-        low_idxs = ents < split
-        high_idxs = ents >= split
-
-        if low_idxs.sum() == 0 or high_idxs.sum() == 0:
+        low  = ents[ents <  split]
+        high = ents[ents >= split]
+        if len(low) == 0 or len(high) == 0:
             continue
-
-        low_mean = np.mean(ents[low_idxs])
-        high_mean = np.mean(ents[high_idxs])
-
-        mse = (np.sum((ents[low_idxs] - low_mean) ** 2) +
-               np.sum((ents[high_idxs] - high_mean) ** 2))
-
+        mse = ((low - low.mean()) ** 2).sum() + ((high - high.mean()) ** 2).sum()
         if mse < best_mse:
-            best_mse = mse
-            best_threshold = split
-
+            best_mse, best_threshold = mse, split
     return best_threshold
 
 
-def decide_layer_range(per_layer_aurocs, num_layers):
-    """
-    OATML decide_layer_range: find the contiguous range of >= 5 layers
-    with the highest average AUROC.
-    """
-    best_mean = -np.inf
-    best_range = (0, 5)
+def select_top_k_layers(scores, k):
+    """Return indices of the top-k layers by score (highest first)."""
+    k = min(k, len(scores))
+    return sorted(range(len(scores)), key=lambda i: -scores[i])[:k]
 
-    for i in range(num_layers):
-        for j in range(i + 1, num_layers + 1):
-            if j - i < 5:
-                continue
-            mean_auroc = np.mean(per_layer_aurocs[i:j])
-            if mean_auroc > best_mean:
-                best_mean = mean_auroc
-                best_range = (i, j)
 
-    return best_mean, best_range
+def _new_lr():
+    return LogisticRegression(class_weight='balanced', max_iter=1000)
 
 
 # ============================================================
@@ -104,16 +169,15 @@ def decide_layer_range(per_layer_aurocs, num_layers):
 # ============================================================
 
 def load_dataset_features(dataset_name):
-    """Load pre-computed features and binarize labels for a dataset."""
+    """Load all_layers.pt and binarize entropy labels."""
     data_file = os.path.join(OUTPUT_BASE, dataset_name, "all_layers.pt")
     logging.info(f"Loading {data_file}...")
     data = torch.load(data_file, weights_only=False)
 
-    X_tbg = data['X_tbg']      # (N, num_layers, hidden_dim)
-    X_slt = data['X_slt']      # (N, num_layers, hidden_dim)
-    entropy = data['entropy']   # (N,) continuous
+    X_tbg    = data['X_tbg']    # (N, num_layers, hidden_dim)
+    X_slt    = data['X_slt']    # (N, num_layers, hidden_dim)
+    entropy  = data['entropy']  # (N,)
 
-    # Binarize using THIS dataset's own best_split threshold
     threshold = best_split(entropy)
     y = (entropy >= threshold).long().numpy()
 
@@ -121,193 +185,285 @@ def load_dataset_features(dataset_name):
     logging.info(f"  {dataset_name}: {num_samples} samples, {num_layers} layers, "
                  f"{hidden_dim}-dim, threshold={threshold:.4f}, "
                  f"low={np.sum(y==0)}, high={np.sum(y==1)}")
-
     return X_tbg, X_slt, y, threshold, entropy
 
 
 def load_lookback_features(dataset_name):
-    """Load pre-computed lookback ratio features and binarize labels.
-
-    Returns:
-        X_lb   : np.ndarray  (N, num_layers * num_heads)  — flattened per-head ratios
-        y      : np.ndarray  (N,)                          — binarized SE labels
-        threshold : float
-        entropy   : torch.Tensor (N,)
-    """
+    """Load lookback_features.pt and binarize entropy labels."""
     data_file = os.path.join(OUTPUT_BASE, dataset_name, "lookback_features.pt")
     logging.info(f"Loading {data_file} ...")
-    data    = torch.load(data_file, weights_only=False)
+    data = torch.load(data_file, weights_only=False)
 
-    X_lb    = data['X_lookback']   # (N, num_layers * num_heads)
-    entropy = data['entropy']       # (N,)
+    X_lb    = data['X_lookback']  # (N, num_layers * num_heads)
+    entropy = data['entropy']
 
     threshold = best_split(entropy)
     y = (entropy >= threshold).long().numpy()
 
     logging.info(f"  {dataset_name}: {X_lb.shape[0]} samples, "
                  f"{X_lb.shape[1]} lookback features, "
-                 f"threshold={threshold:.4f}, "
-                 f"low={np.sum(y==0)}, high={np.sum(y==1)}")
-
+                 f"threshold={threshold:.4f}, low={np.sum(y==0)}, high={np.sum(y==1)}")
     return X_lb.numpy(), y, threshold, entropy
 
 
 # ============================================================
-# Per-layer sweep and probe training
+# Per-layer sweep (PR AUC)
 # ============================================================
 
 def sweep_layers_on_split(X_np, y, num_layers, token_name=""):
-    """Per-layer AUROC sweep with internal train/test split."""
-    aurocs = []
+    """Per-layer PR AUC sweep with internal train/val split."""
+    pr_aucs = []
+    N = len(y)
+    idx = np.arange(N)
+    idx_tv, idx_te = train_test_split(idx, test_size=0.20, random_state=42, stratify=y)
+    idx_tr, idx_va = train_test_split(idx_tv, test_size=0.125, random_state=42, stratify=y[idx_tv])
+
     for layer_idx in range(num_layers):
-        X_layer = X_np[layer_idx]
-
-        X_trainval, X_test, y_trainval, y_test = train_test_split(
-            X_layer, y, test_size=0.1, random_state=42
-        )
-        X_train, X_val, y_train, y_val = train_test_split(
-            X_trainval, y_trainval, test_size=0.2, random_state=42
-        )
-
-        clf = LogisticRegression()
-        clf.fit(X_train, y_train)
-        y_proba = clf.predict_proba(X_test)[:, 1]
-        score = roc_auc_score(y_test, y_proba)
-        aurocs.append(score)
-
+        clf = _new_lr()
+        clf.fit(X_np[layer_idx][idx_tr], y[idx_tr])
+        score = average_precision_score(
+            y[idx_va], clf.predict_proba(X_np[layer_idx][idx_va])[:, 1])
+        pr_aucs.append(score)
         if layer_idx % 5 == 0 and token_name:
-            logging.info(f"  {token_name} Layer {layer_idx:2d}: AUROC = {score:.4f}")
+            logging.info(f"  {token_name} Layer {layer_idx:2d}: PR AUC = {score:.4f}")
 
-    return aurocs
+    return pr_aucs, (idx_tr, idx_va, idx_te)
 
 
 def sweep_layers_full_train(X_train_np, y_train, X_eval_np, y_eval, num_layers):
-    """Per-layer AUROC: train on full train set, evaluate on full eval set."""
-    aurocs = []
+    """Per-layer PR AUC: train on full train split, evaluate on full eval split."""
+    pr_aucs = []
     for layer_idx in range(num_layers):
-        clf = LogisticRegression()
+        clf = _new_lr()
         clf.fit(X_train_np[layer_idx], y_train)
-        y_proba = clf.predict_proba(X_eval_np[layer_idx])[:, 1]
-        score = roc_auc_score(y_eval, y_proba)
-        aurocs.append(score)
-    return aurocs
+        score = average_precision_score(
+            y_eval, clf.predict_proba(X_eval_np[layer_idx])[:, 1])
+        pr_aucs.append(score)
+    return pr_aucs
 
 
-def train_concat_probe_id(X_np, y, r_start, r_end, token_name):
-    """Train probe with internal train/val/test split (ID evaluation)."""
-    X_concat = np.concatenate([X_np[l] for l in range(r_start, r_end)], axis=1)
+# ============================================================
+# Strategy: concat (top-k layers, single LR)
+# ============================================================
 
-    X_trainval, X_test, y_trainval, y_test = train_test_split(
-        X_concat, y, test_size=0.1, random_state=42
-    )
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_trainval, y_trainval, test_size=0.2, random_state=42
-    )
+def train_concat_id(X_np, y, top_k_indices, splits):
+    idx_tr, idx_va, idx_te = splits
+    X_tr = np.concatenate([X_np[l][idx_tr] for l in top_k_indices], axis=1)
+    X_va = np.concatenate([X_np[l][idx_va] for l in top_k_indices], axis=1)
+    X_te = np.concatenate([X_np[l][idx_te] for l in top_k_indices], axis=1)
 
-    clf = LogisticRegression()
-    clf.fit(X_train, y_train)
+    clf = _new_lr()
+    clf.fit(X_tr, y[idx_tr])
 
-    y_val_proba = clf.predict_proba(X_val)[:, 1]
-    val_auroc = roc_auc_score(y_val, y_val_proba)
-
-    y_pred = clf.predict(X_test)
-    y_proba = clf.predict_proba(X_test)[:, 1]
-    test_acc = accuracy_score(y_test, y_pred)
-    test_auroc = roc_auc_score(y_test, y_proba)
-
+    val_pr_auc = average_precision_score(y[idx_va], clf.predict_proba(X_va)[:, 1])
+    y_pred = clf.predict(X_te)
+    y_prob = clf.predict_proba(X_te)[:, 1]
     return {
-        'range': (r_start, r_end),
-        'concat_dim': X_concat.shape[1],
-        'val_auroc': val_auroc,
-        'test_acc': test_acc,
-        'test_auroc': test_auroc,
-        'y_test': y_test,
-        'y_pred': y_pred,
+        'strategy':      'concat',
+        'clf':           clf,
+        'layer_indices': top_k_indices,
+        'val_pr_auc':    val_pr_auc,
+        'metrics':       compute_metrics(y[idx_te], y_pred, y_prob),
+        'y_test':        y[idx_te],
+        'y_pred':        y_pred,
     }
 
 
-def train_concat_probe_ood(X_train_np, y_train, X_eval_np, y_eval, r_start, r_end):
-    """Train on full train set, evaluate on full eval set (OOD evaluation)."""
-    X_train_concat = np.concatenate(
-        [X_train_np[l] for l in range(r_start, r_end)], axis=1)
-    X_eval_concat = np.concatenate(
-        [X_eval_np[l] for l in range(r_start, r_end)], axis=1)
+def train_concat_ood(X_train_np, y_train, X_eval_np, y_eval, top_k_indices):
+    X_tr = np.concatenate([X_train_np[l] for l in top_k_indices], axis=1)
+    X_ev = np.concatenate([X_eval_np[l]  for l in top_k_indices], axis=1)
+    clf = _new_lr()
+    clf.fit(X_tr, y_train)
+    y_pred = clf.predict(X_ev)
+    y_prob = clf.predict_proba(X_ev)[:, 1]
+    return compute_metrics(y_eval, y_pred, y_prob)
 
-    clf = LogisticRegression()
-    clf.fit(X_train_concat, y_train)
 
-    y_pred = clf.predict(X_eval_concat)
-    y_proba = clf.predict_proba(X_eval_concat)[:, 1]
-    eval_acc = accuracy_score(y_eval, y_pred)
-    eval_auroc = roc_auc_score(y_eval, y_proba)
+# ============================================================
+# Strategy: hard_vote / soft_vote (per-layer probes, top-k)
+# ============================================================
 
-    return eval_auroc, eval_acc
+def train_voting_id(X_np, y, top_k_indices, splits, vote_mode):
+    idx_tr, idx_va, idx_te = splits
+    layer_probes = []
+    for l in top_k_indices:
+        clf = _new_lr()
+        clf.fit(X_np[l][idx_tr], y[idx_tr])
+        layer_probes.append((l, clf))
+
+    def _aggregate(probs_2d):
+        # probs_2d: (k, n_samples)
+        if vote_mode == 'hard_vote':
+            return (probs_2d >= 0.5).astype(float).mean(axis=0)
+        return probs_2d.mean(axis=0)
+
+    val_probs = np.array([clf.predict_proba(X_np[l][idx_va])[:, 1]
+                          for l, clf in layer_probes])
+    val_pr_auc = average_precision_score(y[idx_va], _aggregate(val_probs))
+
+    test_probs = np.array([clf.predict_proba(X_np[l][idx_te])[:, 1]
+                           for l, clf in layer_probes])
+    y_prob = _aggregate(test_probs)
+    y_pred = (y_prob >= 0.5).astype(int)
+
+    return {
+        'strategy':      vote_mode,
+        'layer_probes':  layer_probes,
+        'layer_indices': top_k_indices,
+        'val_pr_auc':    val_pr_auc,
+        'metrics':       compute_metrics(y[idx_te], y_pred, y_prob),
+        'y_test':        y[idx_te],
+        'y_pred':        y_pred,
+    }
+
+
+def train_voting_ood(X_train_np, y_train, X_eval_np, y_eval, top_k_indices, vote_mode):
+    layer_probes = []
+    for l in top_k_indices:
+        clf = _new_lr()
+        clf.fit(X_train_np[l], y_train)
+        layer_probes.append((l, clf))
+
+    probs = np.array([clf.predict_proba(X_eval_np[l])[:, 1]
+                      for l, clf in layer_probes])
+    if vote_mode == 'hard_vote':
+        y_prob = (probs >= 0.5).astype(float).mean(axis=0)
+    else:
+        y_prob = probs.mean(axis=0)
+    y_pred = (y_prob >= 0.5).astype(int)
+    return compute_metrics(y_eval, y_pred, y_prob)
+
+
+# ============================================================
+# Strategy: meta (all-layer probes → meta LR)
+# ============================================================
+
+def train_meta_id(X_np, y, num_layers, splits):
+    """
+    Train one LR per layer on the train split.
+    Collect their val-set probabilities → train meta LR on val probs.
+    Evaluate on test set.
+    No data leakage: layer probes never see val; meta LR never sees test.
+    """
+    idx_tr, idx_va, idx_te = splits
+
+    layer_probes = []
+    val_probs  = []
+    test_probs = []
+
+    for l in range(num_layers):
+        clf = _new_lr()
+        clf.fit(X_np[l][idx_tr], y[idx_tr])
+        val_probs.append(clf.predict_proba(X_np[l][idx_va])[:, 1])
+        test_probs.append(clf.predict_proba(X_np[l][idx_te])[:, 1])
+        layer_probes.append((l, clf))
+
+    X_meta_val  = np.array(val_probs).T   # (n_val,  num_layers)
+    X_meta_test = np.array(test_probs).T  # (n_test, num_layers)
+
+    meta_clf = _new_lr()
+    meta_clf.fit(X_meta_val, y[idx_va])
+
+    y_pred = meta_clf.predict(X_meta_test)
+    y_prob = meta_clf.predict_proba(X_meta_test)[:, 1]
+
+    val_pr_auc = average_precision_score(
+        y[idx_va], meta_clf.predict_proba(X_meta_val)[:, 1])
+
+    return {
+        'strategy':     'meta',
+        'layer_probes': layer_probes,
+        'meta_clf':     meta_clf,
+        'val_pr_auc':   val_pr_auc,
+        'metrics':      compute_metrics(y[idx_te], y_pred, y_prob),
+        'y_test':       y[idx_te],
+        'y_pred':       y_pred,
+    }
+
+
+def train_meta_ood(X_train_np, y_train, X_eval_np, y_eval, num_layers):
+    layer_probes = []
+    train_probs  = []
+    eval_probs   = []
+
+    for l in range(num_layers):
+        clf = _new_lr()
+        clf.fit(X_train_np[l], y_train)
+        train_probs.append(clf.predict_proba(X_train_np[l])[:, 1])
+        eval_probs.append(clf.predict_proba(X_eval_np[l])[:, 1])
+        layer_probes.append((l, clf))
+
+    X_meta_train = np.array(train_probs).T
+    X_meta_eval  = np.array(eval_probs).T
+
+    meta_clf = _new_lr()
+    meta_clf.fit(X_meta_train, y_train)
+
+    y_pred = meta_clf.predict(X_meta_eval)
+    y_prob = meta_clf.predict_proba(X_meta_eval)[:, 1]
+    return compute_metrics(y_eval, y_pred, y_prob)
 
 
 # ============================================================
 # Mode: In-Distribution
 # ============================================================
 
-def main_id(dataset_name, save_probe=False):
-    """Full ID evaluation for a single dataset."""
+def main_id(dataset_name, strategy='concat', top_k=10, save_probe=False):
     X_tbg, X_slt, y, threshold, entropy = load_dataset_features(dataset_name)
     num_samples, num_layers, hidden_dim = X_tbg.shape
 
     results = {}
     for token_name, X_raw in [("TBG", X_tbg), ("SLT", X_slt)]:
-        logging.info(f"\n{'='*40}")
-        logging.info(f"[{dataset_name}] Processing {token_name}")
-        logging.info(f"{'='*40}")
+        logging.info(f"\n{'='*40}\n[{dataset_name}] {token_name}  strategy={strategy}\n{'='*40}")
 
         X_np = X_raw.numpy().transpose(1, 0, 2)  # (num_layers, N, hidden_dim)
 
-        # Per-layer sweep
-        aurocs = sweep_layers_on_split(X_np, y, num_layers, token_name)
+        pr_aucs, splits = sweep_layers_on_split(X_np, y, num_layers, token_name)
+        top_k_indices   = select_top_k_layers(pr_aucs, top_k)
+        logging.info(f"{token_name} top-{top_k} layers (PR AUC): {sorted(top_k_indices)}")
 
-        # Best contiguous range
-        best_mean, (r_start, r_end) = decide_layer_range(aurocs, num_layers)
-        logging.info(f"{token_name} best range: [{r_start}, {r_end}) "
-                     f"mean AUROC = {best_mean:.4f}")
+        if strategy == 'concat':
+            result = train_concat_id(X_np, y, top_k_indices, splits)
+        elif strategy in ('hard_vote', 'soft_vote'):
+            result = train_voting_id(X_np, y, top_k_indices, splits, strategy)
+        elif strategy == 'meta':
+            result = train_meta_id(X_np, y, num_layers, splits)
+        else:
+            raise ValueError(f"Unknown strategy: {strategy}")
 
-        # Concatenated probe
-        result = train_concat_probe_id(X_np, y, r_start, r_end, token_name)
-        result['per_layer_aurocs'] = aurocs
-        result['range_mean'] = best_mean
+        result['per_layer_pr_aucs'] = pr_aucs
+        result['top_k_indices']     = top_k_indices
         results[token_name] = result
 
-    # Print results
+    # ---- Print results ----
     print(f"\n{'='*60}")
-    print(f"SEP RESULTS — {dataset_name} (In-Distribution)")
+    print(f"SEP RESULTS — {dataset_name} (In-Distribution)  strategy={strategy}")
     print(f"{'='*60}")
     print(f"Model:        {MODEL_NAME}")
     print(f"NLI Model:    {NLI_MODEL}")
     print(f"SE threshold: {threshold:.4f} (best_split)")
     print(f"Samples:      {num_samples}")
     print(f"Class dist:   low={np.sum(y==0)}, high={np.sum(y==1)}")
-    print()
+    print(f"Top-k layers: {top_k}")
 
     for tn in ["TBG", "SLT"]:
         r = results[tn]
-        r_start, r_end = r['range']
-        print(f"--- {tn} ---")
-        print(f"  Layer range:   [{r_start}, {r_end})")
-        print(f"  Feature dim:   {r['concat_dim']}")
-        print(f"  Val AUROC:     {r['val_auroc']:.4f}")
-        print(f"  Test AUROC:    {r['test_auroc']:.4f}")
-        print(f"  Test Accuracy: {r['test_acc']:.4f}")
-        print()
+        print(f"\n--- {tn} (strategy={r['strategy']}) ---")
+        print(f"  Val PR AUC:    {r['val_pr_auc']:.4f}")
+        print(f"  Test metrics:")
+        print_metrics(r['metrics'], indent=4)
+        if 'layer_indices' in r:
+            print(f"  Selected layers: {sorted(r['layer_indices'])}")
 
-    # Per-layer table
-    print("Per-layer AUROC:")
+    print(f"\nPer-layer PR AUC:")
     print(f"  {'Layer':>5}  {'TBG':>8}  {'SLT':>8}")
     for i in range(num_layers):
-        tbg_m = "*" if results['TBG']['range'][0] <= i < results['TBG']['range'][1] else " "
-        slt_m = "*" if results['SLT']['range'][0] <= i < results['SLT']['range'][1] else " "
-        print(f"  {i:>5}  {results['TBG']['per_layer_aurocs'][i]:>8.4f}{tbg_m} "
-              f"{results['SLT']['per_layer_aurocs'][i]:>8.4f}{slt_m}")
-    print("  (* = in best range)")
+        tbg_m = "*" if i in results['TBG']['top_k_indices'] else " "
+        slt_m = "*" if i in results['SLT']['top_k_indices'] else " "
+        print(f"  {i:>5}  {results['TBG']['per_layer_pr_aucs'][i]:>8.4f}{tbg_m} "
+              f"{results['SLT']['per_layer_pr_aucs'][i]:>8.4f}{slt_m}")
+    print("  (* = in top-k)")
 
-    # Classification reports
     for tn in ["TBG", "SLT"]:
         r = results[tn]
         print(f"\nClassification Report ({tn}):")
@@ -315,34 +471,70 @@ def main_id(dataset_name, save_probe=False):
                                     target_names=["Low SE", "High SE"]))
     print("=" * 60)
 
-    # ---- Optional: save probes for use in inference_with_gate.py ----
+    # ---- Optional: save probe ----
     if save_probe:
-        X_tbg_np = X_tbg.numpy().transpose(1, 0, 2)  # (num_layers, N, hidden_dim)
+        X_tbg_np = X_tbg.numpy().transpose(1, 0, 2)
         X_slt_np = X_slt.numpy().transpose(1, 0, 2)
 
         for tn, X_np in [("TBG", X_tbg_np), ("SLT", X_slt_np)]:
-            r_start, r_end = results[tn]['range']
-            # Retrain on FULL dataset (no train/test split) for use at inference
-            X_full = np.concatenate([X_np[l] for l in range(r_start, r_end)], axis=1)
-            clf_full = LogisticRegression(max_iter=1000)
-            clf_full.fit(X_full, y)
+            r = results[tn]
 
-            probe_bundle = {
-                'clf':          clf_full,
-                'r_start':      r_start,
-                'r_end':        r_end,
-                'threshold':    threshold,   # SE binarization threshold
-                'token_type':   tn,
-                'dataset':      dataset_name,
-                'hidden_dim':   X_tbg.shape[2],
-                'num_layers':   X_tbg.shape[1],
-            }
+            if strategy == 'concat':
+                layer_indices = r['layer_indices']
+                X_full = np.concatenate([X_np[l] for l in layer_indices], axis=1)
+                clf_full = _new_lr()
+                clf_full.fit(X_full, y)
+                probe_bundle = {
+                    'strategy':      'concat',
+                    'clf':           clf_full,
+                    'layer_indices': layer_indices,
+                    'threshold':     threshold,
+                    'token_type':    tn,
+                    'dataset':       dataset_name,
+                    'hidden_dim':    hidden_dim,
+                    'num_layers':    num_layers,
+                }
+
+            elif strategy in ('hard_vote', 'soft_vote'):
+                layer_probes_full = []
+                for l in r['layer_indices']:
+                    clf_l = _new_lr()
+                    clf_l.fit(X_np[l], y)
+                    layer_probes_full.append((l, clf_l))
+                probe_bundle = {
+                    'strategy':      strategy,
+                    'layer_probes':  layer_probes_full,
+                    'layer_indices': r['layer_indices'],
+                    'threshold':     threshold,
+                    'token_type':    tn,
+                    'dataset':       dataset_name,
+                    'hidden_dim':    hidden_dim,
+                    'num_layers':    num_layers,
+                }
+
+            elif strategy == 'meta':
+                # Retrain layer probes on full data; keep the val-trained meta clf.
+                layer_probes_full = []
+                for l in range(num_layers):
+                    clf_l = _new_lr()
+                    clf_l.fit(X_np[l], y)
+                    layer_probes_full.append((l, clf_l))
+                probe_bundle = {
+                    'strategy':     'meta',
+                    'layer_probes': layer_probes_full,
+                    'meta_clf':     r['meta_clf'],
+                    'threshold':    threshold,
+                    'token_type':   tn,
+                    'dataset':      dataset_name,
+                    'hidden_dim':   hidden_dim,
+                    'num_layers':   num_layers,
+                }
+
             probe_path = os.path.join(OUTPUT_BASE, dataset_name, f"sep_probe_{tn}.pkl")
             with open(probe_path, "wb") as f:
                 pickle.dump(probe_bundle, f)
             logging.info(f"Saved {tn} probe → {probe_path}  "
-                         f"(layers [{r_start},{r_end}), "
-                         f"SE threshold={threshold:.4f})")
+                         f"(strategy={strategy}, threshold={threshold:.4f})")
 
     return results
 
@@ -351,87 +543,68 @@ def main_id(dataset_name, save_probe=False):
 # Mode: Out-of-Distribution
 # ============================================================
 
-def main_ood(train_dataset, eval_dataset):
-    """Train probe on train_dataset, evaluate on eval_dataset."""
-    logging.info(f"OOD: train={train_dataset}, eval={eval_dataset}")
+def main_ood(train_dataset, eval_dataset, strategy='concat', top_k=10):
+    logging.info(f"OOD: train={train_dataset}, eval={eval_dataset}, strategy={strategy}")
 
-    # Load both datasets
     X_tbg_train, X_slt_train, y_train, thresh_train, _ = load_dataset_features(train_dataset)
-    X_tbg_eval, X_slt_eval, y_eval, thresh_eval, _ = load_dataset_features(eval_dataset)
-
+    X_tbg_eval,  X_slt_eval,  y_eval,  thresh_eval,  _ = load_dataset_features(eval_dataset)
     num_layers = X_tbg_train.shape[1]
 
     results = {}
-    for token_name, X_train_raw, X_eval_raw in [
+    for token_name, X_tr_raw, X_ev_raw in [
         ("TBG", X_tbg_train, X_tbg_eval),
         ("SLT", X_slt_train, X_slt_eval),
     ]:
-        logging.info(f"\n[{train_dataset}->{eval_dataset}] {token_name}")
+        X_train_np = X_tr_raw.numpy().transpose(1, 0, 2)
+        X_eval_np  = X_ev_raw.numpy().transpose(1, 0, 2)
 
-        X_train_np = X_train_raw.numpy().transpose(1, 0, 2)
-        X_eval_np = X_eval_raw.numpy().transpose(1, 0, 2)
+        pr_aucs = sweep_layers_full_train(X_train_np, y_train, X_eval_np, y_eval, num_layers)
+        top_k_indices = select_top_k_layers(pr_aucs, top_k)
 
-        # Per-layer sweep: train on full train, eval on full eval
-        aurocs = sweep_layers_full_train(X_train_np, y_train, X_eval_np, y_eval, num_layers)
-
-        # Best layer range from cross-dataset per-layer AUROCs
-        best_mean, (r_start, r_end) = decide_layer_range(aurocs, num_layers)
-        logging.info(f"  {token_name} best range: [{r_start}, {r_end}) "
-                     f"mean AUROC = {best_mean:.4f}")
-
-        # Concatenated probe: train on full train, eval on full eval
-        eval_auroc, eval_acc = train_concat_probe_ood(
-            X_train_np, y_train, X_eval_np, y_eval, r_start, r_end)
+        if strategy == 'concat':
+            metrics = train_concat_ood(X_train_np, y_train, X_eval_np, y_eval, top_k_indices)
+        elif strategy in ('hard_vote', 'soft_vote'):
+            metrics = train_voting_ood(X_train_np, y_train, X_eval_np, y_eval,
+                                       top_k_indices, strategy)
+        elif strategy == 'meta':
+            metrics = train_meta_ood(X_train_np, y_train, X_eval_np, y_eval, num_layers)
+        else:
+            raise ValueError(f"Unknown strategy: {strategy}")
 
         results[token_name] = {
-            'range': (r_start, r_end),
-            'range_mean': best_mean,
-            'eval_auroc': eval_auroc,
-            'eval_acc': eval_acc,
-            'per_layer_aurocs': aurocs,
+            'metrics':            metrics,
+            'top_k_indices':      top_k_indices,
+            'per_layer_pr_aucs':  pr_aucs,
         }
 
-    # Print results
     print(f"\n{'='*60}")
-    print(f"SEP OOD RESULTS — Train: {train_dataset} -> Eval: {eval_dataset}")
+    print(f"SEP OOD RESULTS — Train: {train_dataset} -> Eval: {eval_dataset}  strategy={strategy}")
     print(f"{'='*60}")
     print(f"Train threshold: {thresh_train:.4f}, Eval threshold: {thresh_eval:.4f}")
-    print(f"Train samples:   {len(y_train)}, Eval samples: {len(y_eval)}")
-    print()
+    print(f"Train: {len(y_train)} samples  |  Eval: {len(y_eval)} samples")
     for tn in ["TBG", "SLT"]:
         r = results[tn]
-        r_start, r_end = r['range']
-        print(f"--- {tn} ---")
-        print(f"  Layer range: [{r_start}, {r_end})")
-        print(f"  Eval AUROC:  {r['eval_auroc']:.4f}")
-        print(f"  Eval Acc:    {r['eval_acc']:.4f}")
+        print(f"\n--- {tn} ---")
+        print_metrics(r['metrics'])
+        print(f"  Top-{top_k} layers: {sorted(r['top_k_indices'])}")
     print("=" * 60)
-
     return results
 
 
 # ============================================================
-# Mode: Matrix (all cross-dataset pairs)
+# Mode: Matrix (all cross-dataset pairs, concat strategy)
 # ============================================================
 
-def main_matrix():
-    """Run all 4x4 train/eval combinations and print AUROC matrix."""
-    # Check which datasets have data
-    available = []
-    for ds in QA_DATASETS:
-        data_file = os.path.join(OUTPUT_BASE, ds, "all_layers.pt")
-        if os.path.exists(data_file):
-            available.append(ds)
-        else:
-            logging.warning(f"Skipping {ds}: {data_file} not found")
+def main_matrix(top_k=10):
+    available = [ds for ds in ALL_DATASETS
+                 if os.path.exists(os.path.join(OUTPUT_BASE, ds, "all_layers.pt"))]
 
     if len(available) < 2:
-        logging.error(f"Need at least 2 datasets for matrix evaluation. Found: {available}")
+        logging.error(f"Need ≥2 datasets for matrix. Found: {available}")
         return
 
-    logging.info(f"Available datasets: {available}")
+    logging.info(f"Matrix datasets: {available}")
 
-    # Pre-load all datasets
     all_data = {}
     for ds in available:
         X_tbg, X_slt, y, threshold, entropy = load_dataset_features(ds)
@@ -440,221 +613,185 @@ def main_matrix():
             'threshold': threshold, 'entropy': entropy,
         }
 
-    # Compute matrix for both token positions
     for token_name in ["TBG", "SLT"]:
-        auroc_matrix = np.zeros((len(available), len(available)))
-        range_matrix = {}
+        metric_matrix = {
+            'pr_auc': np.zeros((len(available), len(available))),
+            'f1':     np.zeros((len(available), len(available))),
+            'recall': np.zeros((len(available), len(available))),
+        }
 
         for i, train_ds in enumerate(available):
-            X_train_raw = all_data[train_ds][f'X_{token_name.lower()}']
-            y_train = all_data[train_ds]['y']
-            num_layers = X_train_raw.shape[1]
-            X_train_np = X_train_raw.numpy().transpose(1, 0, 2)
+            X_tr_raw = all_data[train_ds][f'X_{token_name.lower()}']
+            y_train  = all_data[train_ds]['y']
+            num_layers = X_tr_raw.shape[1]
+            X_train_np = X_tr_raw.numpy().transpose(1, 0, 2)
 
             for j, eval_ds in enumerate(available):
-                X_eval_raw = all_data[eval_ds][f'X_{token_name.lower()}']
-                y_eval = all_data[eval_ds]['y']
-                X_eval_np = X_eval_raw.numpy().transpose(1, 0, 2)
+                X_ev_raw  = all_data[eval_ds][f'X_{token_name.lower()}']
+                y_eval    = all_data[eval_ds]['y']
+                X_eval_np = X_ev_raw.numpy().transpose(1, 0, 2)
 
                 if train_ds == eval_ds:
-                    # ID: use internal splits for layer selection + evaluation
-                    aurocs = sweep_layers_on_split(X_train_np, y_train, num_layers)
-                    _, (r_start, r_end) = decide_layer_range(aurocs, num_layers)
-
-                    # Still compute ID AUROC with concat probe internal split
-                    result = train_concat_probe_id(X_train_np, y_train, r_start, r_end, "")
-                    auroc_matrix[i][j] = result['test_auroc']
-                    range_matrix[(train_ds, eval_ds)] = (r_start, r_end)
+                    pr_aucs, splits = sweep_layers_on_split(X_train_np, y_train, num_layers)
+                    top_k_indices   = select_top_k_layers(pr_aucs, top_k)
+                    r = train_concat_id(X_train_np, y_train, top_k_indices, splits)
+                    m = r['metrics']
                 else:
-                    # OOD: sweep across datasets
-                    aurocs = sweep_layers_full_train(
+                    pr_aucs       = sweep_layers_full_train(
                         X_train_np, y_train, X_eval_np, y_eval, num_layers)
-                    _, (r_start, r_end) = decide_layer_range(aurocs, num_layers)
+                    top_k_indices = select_top_k_layers(pr_aucs, top_k)
+                    m = train_concat_ood(X_train_np, y_train, X_eval_np, y_eval, top_k_indices)
 
-                    eval_auroc, _ = train_concat_probe_ood(
-                        X_train_np, y_train, X_eval_np, y_eval, r_start, r_end)
-                    auroc_matrix[i][j] = eval_auroc
-                    range_matrix[(train_ds, eval_ds)] = (r_start, r_end)
-
+                metric_matrix['pr_auc'][i][j] = m['pr_auc']
+                metric_matrix['f1'][i][j]     = m['f1']
+                metric_matrix['recall'][i][j] = m['recall']
                 logging.info(f"  {token_name} {train_ds:>10} -> {eval_ds:<10}: "
-                             f"AUROC={auroc_matrix[i][j]:.4f} "
-                             f"layers=[{range_matrix[(train_ds,eval_ds)][0]},"
-                             f"{range_matrix[(train_ds,eval_ds)][1]})")
+                             f"PR_AUC={m['pr_auc']:.4f}  F1={m['f1']:.4f}  "
+                             f"Recall={m['recall']:.4f}")
 
-        # Print matrix
-        print(f"\n{'='*70}")
-        print(f"CROSS-DATASET AUROC MATRIX — {token_name}")
-        print(f"{'='*70}")
-        print(f"Model: {MODEL_NAME} | NLI: {NLI_MODEL}")
-        print()
+        for metric_name, mat in metric_matrix.items():
+            print(f"\n{'='*70}")
+            print(f"CROSS-DATASET {metric_name.upper()} MATRIX — {token_name}  (top_k={top_k})")
+            print(f"{'='*70}")
+            print(f"Model: {MODEL_NAME} | NLI: {NLI_MODEL}")
+            header = f"{'Train \\ Eval':>14}"
+            for ds in available:
+                header += f"  {ds:>12}"
+            print(header)
+            print("-" * len(header))
+            for i, train_ds in enumerate(available):
+                row = f"{train_ds:>14}"
+                for j in range(len(available)):
+                    marker = " *" if i == j else "  "
+                    row += f"  {mat[i][j]:>10.4f}{marker}"
+                print(row)
+            diag     = np.diag(mat)
+            off_diag = mat[~np.eye(len(available), dtype=bool)]
+            print(f"\n  ID mean:  {np.mean(diag):.4f}")
+            print(f"  OOD mean: {np.mean(off_diag):.4f}")
 
-        # Header
-        label = "Train \\ Eval"
-        header = f"{label:>14}"
-        for ds in available:
-            header += f"  {ds:>12}"
-        print(header)
-        print("-" * len(header))
-
-        # Rows
-        for i, train_ds in enumerate(available):
-            row = f"{train_ds:>14}"
-            for j, eval_ds in enumerate(available):
-                val = auroc_matrix[i][j]
-                marker = " *" if train_ds == eval_ds else "  "
-                row += f"  {val:>10.4f}{marker}"
-            print(row)
-
-        print()
-        print("  (* = in-distribution, others = OOD)")
-
-        # Summary stats
-        diag = np.diag(auroc_matrix)
-        off_diag = auroc_matrix[~np.eye(len(available), dtype=bool)]
-        print(f"\n  ID mean AUROC:  {np.mean(diag):.4f} (diagonal)")
-        print(f"  OOD mean AUROC: {np.mean(off_diag):.4f} (off-diagonal)")
-        print(f"  OOD/ID ratio:   {np.mean(off_diag)/np.mean(diag):.4f}")
-
-        # Per-dataset thresholds
         print(f"\n  SE thresholds:")
         for ds in available:
-            t = all_data[ds]['threshold']
-            n = len(all_data[ds]['y'])
-            low = np.sum(all_data[ds]['y'] == 0)
+            t    = all_data[ds]['threshold']
+            n    = len(all_data[ds]['y'])
+            low  = np.sum(all_data[ds]['y'] == 0)
             high = np.sum(all_data[ds]['y'] == 1)
             print(f"    {ds:>12}: threshold={t:.4f}, N={n}, low={low}, high={high}")
-
     print(f"\n{'='*70}")
 
 
 # ============================================================
-# Lookback Lens probe (Chuang et al., EMNLP 2024)
-# Features are already flat (num_layers * num_heads) — no layer sweep needed.
+# Lookback Lens probe
 # ============================================================
 
 def main_lookback_id(dataset_name):
-    """In-distribution evaluation using Lookback Ratio features."""
     X_lb, y, threshold, entropy = load_lookback_features(dataset_name)
 
-    X_trainval, X_test, y_trainval, y_test = train_test_split(
-        X_lb, y, test_size=0.1, random_state=42)
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_trainval, y_trainval, test_size=0.2, random_state=42)
+    idx = np.arange(len(y))
+    idx_tv, idx_te = train_test_split(idx, test_size=0.20, random_state=42, stratify=y)
+    idx_tr, idx_va = train_test_split(idx_tv, test_size=0.125, random_state=42, stratify=y[idx_tv])
 
-    clf = LogisticRegression(max_iter=1000)
-    clf.fit(X_train, y_train)
+    clf = _new_lr()
+    clf.fit(X_lb[idx_tr], y[idx_tr])
 
-    val_auroc  = roc_auc_score(y_val,  clf.predict_proba(X_val)[:, 1])
-    y_pred     = clf.predict(X_test)
-    test_auroc = roc_auc_score(y_test, clf.predict_proba(X_test)[:, 1])
-    test_acc   = accuracy_score(y_test, y_pred)
+    val_pr_auc = average_precision_score(y[idx_va], clf.predict_proba(X_lb[idx_va])[:, 1])
+    y_pred = clf.predict(X_lb[idx_te])
+    y_prob = clf.predict_proba(X_lb[idx_te])[:, 1]
+    metrics = compute_metrics(y[idx_te], y_pred, y_prob)
 
     print(f"\n{'='*60}")
     print(f"LOOKBACK LENS RESULTS — {dataset_name} (In-Distribution)")
     print(f"{'='*60}")
-    print(f"Model:        {MODEL_NAME}")
-    print(f"NLI Model:    {NLI_MODEL}")
-    print(f"SE threshold: {threshold:.4f} (best_split)")
-    print(f"Samples:      {len(y)}")
-    print(f"Class dist:   low={np.sum(y==0)}, high={np.sum(y==1)}")
-    print(f"Feature dim:  {X_lb.shape[1]}  (num_layers × num_heads)")
-    print()
-    print(f"  Val AUROC:     {val_auroc:.4f}")
-    print(f"  Test AUROC:    {test_auroc:.4f}")
-    print(f"  Test Accuracy: {test_acc:.4f}")
-    print()
-    print(f"Classification Report:")
-    print(classification_report(y_test, y_pred, target_names=["Low SE", "High SE"]))
+    print(f"Model: {MODEL_NAME}  |  NLI: {NLI_MODEL}")
+    print(f"SE threshold: {threshold:.4f}  |  Samples: {len(y)}")
+    print(f"Class dist: low={np.sum(y==0)}, high={np.sum(y==1)}")
+    print(f"Feature dim: {X_lb.shape[1]}  (num_layers × num_heads)")
+    print(f"\nVal PR AUC: {val_pr_auc:.4f}")
+    print(f"Test metrics:")
+    print_metrics(metrics)
+    print(f"\nClassification Report:")
+    print(classification_report(y[idx_te], y_pred, target_names=["Low SE", "High SE"]))
     print("=" * 60)
 
 
 def main_lookback_ood(train_dataset, eval_dataset):
-    """OOD evaluation using Lookback Ratio features."""
-    logging.info(f"Lookback OOD: train={train_dataset}, eval={eval_dataset}")
+    X_tr, y_tr, thresh_tr, _ = load_lookback_features(train_dataset)
+    X_ev, y_ev, thresh_ev, _ = load_lookback_features(eval_dataset)
 
-    X_train, y_train, thresh_train, _ = load_lookback_features(train_dataset)
-    X_eval,  y_eval,  thresh_eval,  _ = load_lookback_features(eval_dataset)
-
-    clf = LogisticRegression(max_iter=1000)
-    clf.fit(X_train, y_train)
-
-    y_pred     = clf.predict(X_eval)
-    eval_auroc = roc_auc_score(y_eval, clf.predict_proba(X_eval)[:, 1])
-    eval_acc   = accuracy_score(y_eval, y_pred)
+    clf = _new_lr()
+    clf.fit(X_tr, y_tr)
+    y_pred   = clf.predict(X_ev)
+    y_prob   = clf.predict_proba(X_ev)[:, 1]
+    metrics  = compute_metrics(y_ev, y_pred, y_prob)
 
     print(f"\n{'='*60}")
     print(f"LOOKBACK LENS OOD — Train: {train_dataset} -> Eval: {eval_dataset}")
     print(f"{'='*60}")
-    print(f"Train threshold: {thresh_train:.4f}  |  Eval threshold: {thresh_eval:.4f}")
-    print(f"Train: {len(y_train)} samples  |  Eval: {len(y_eval)} samples")
-    print(f"  Eval AUROC:  {eval_auroc:.4f}")
-    print(f"  Eval Acc:    {eval_acc:.4f}")
+    print(f"Train threshold: {thresh_tr:.4f}  |  Eval threshold: {thresh_ev:.4f}")
+    print_metrics(metrics)
     print("=" * 60)
 
 
 def main_lookback_matrix():
-    """Full 4×4 cross-dataset AUROC matrix using Lookback Ratio features."""
-    available = []
-    for ds in QA_DATASETS:
-        data_file = os.path.join(OUTPUT_BASE, ds, "lookback_features.pt")
-        if os.path.exists(data_file):
-            available.append(ds)
-        else:
-            logging.warning(f"Skipping {ds}: {data_file} not found")
+    available = [ds for ds in ALL_DATASETS
+                 if os.path.exists(os.path.join(OUTPUT_BASE, ds, "lookback_features.pt"))]
 
     if len(available) < 2:
         logging.error(f"Need ≥2 datasets. Found: {available}")
         return
 
-    all_data = {}
+    all_data = {ds: {} for ds in available}
     for ds in available:
-        X, y, threshold, entropy = load_lookback_features(ds)
+        X, y, threshold, _ = load_lookback_features(ds)
         all_data[ds] = {'X': X, 'y': y, 'threshold': threshold}
 
-    auroc_matrix = np.zeros((len(available), len(available)))
+    pr_auc_matrix = np.zeros((len(available), len(available)))
+    f1_matrix     = np.zeros((len(available), len(available)))
+
     for i, train_ds in enumerate(available):
-        X_train = all_data[train_ds]['X']
-        y_train = all_data[train_ds]['y']
         for j, eval_ds in enumerate(available):
-            X_eval = all_data[eval_ds]['X']
-            y_eval = all_data[eval_ds]['y']
+            X_tr, y_tr = all_data[train_ds]['X'], all_data[train_ds]['y']
+            X_ev, y_ev = all_data[eval_ds]['X'],  all_data[eval_ds]['y']
             if train_ds == eval_ds:
-                X_tv, X_te, y_tv, y_te = train_test_split(X_train, y_train,
-                                                            test_size=0.1, random_state=42)
-                X_tr, _, y_tr, _ = train_test_split(X_tv, y_tv, test_size=0.2, random_state=42)
-                clf = LogisticRegression(max_iter=1000)
-                clf.fit(X_tr, y_tr)
-                auroc_matrix[i][j] = roc_auc_score(y_te, clf.predict_proba(X_te)[:, 1])
+                idx = np.arange(len(y_tr))
+                idx_tv, idx_te = train_test_split(idx, test_size=0.20, random_state=42, stratify=y_tr)
+                idx_tr2, _     = train_test_split(idx_tv, test_size=0.125, random_state=42, stratify=y_tr[idx_tv])
+                clf = _new_lr()
+                clf.fit(X_tr[idx_tr2], y_tr[idx_tr2])
+                y_pred = clf.predict(X_tr[idx_te])
+                y_prob = clf.predict_proba(X_tr[idx_te])[:, 1]
+                m = compute_metrics(y_tr[idx_te], y_pred, y_prob)
             else:
-                clf = LogisticRegression(max_iter=1000)
-                clf.fit(X_train, y_train)
-                auroc_matrix[i][j] = roc_auc_score(y_eval, clf.predict_proba(X_eval)[:, 1])
+                clf = _new_lr()
+                clf.fit(X_tr, y_tr)
+                y_pred = clf.predict(X_ev)
+                y_prob = clf.predict_proba(X_ev)[:, 1]
+                m = compute_metrics(y_ev, y_pred, y_prob)
+            pr_auc_matrix[i][j] = m['pr_auc']
+            f1_matrix[i][j]     = m['f1']
             logging.info(f"  {train_ds:>12} -> {eval_ds:<12}: "
-                         f"AUROC={auroc_matrix[i][j]:.4f}")
+                         f"PR_AUC={m['pr_auc']:.4f}  F1={m['f1']:.4f}")
 
+    for name, mat in [("PR AUC", pr_auc_matrix), ("F1", f1_matrix)]:
+        print(f"\n{'='*70}")
+        print(f"LOOKBACK LENS — CROSS-DATASET {name} MATRIX")
+        print(f"{'='*70}")
+        header = f"{'Train \\ Eval':>14}"
+        for ds in available:
+            header += f"  {ds:>12}"
+        print(header)
+        print("-" * len(header))
+        for i, train_ds in enumerate(available):
+            row = f"{train_ds:>14}"
+            for j in range(len(available)):
+                marker = " *" if i == j else "  "
+                row += f"  {mat[i][j]:>10.4f}{marker}"
+            print(row)
+        diag     = np.diag(mat)
+        off_diag = mat[~np.eye(len(available), dtype=bool)]
+        print(f"\n  ID mean:  {np.mean(diag):.4f}")
+        print(f"  OOD mean: {np.mean(off_diag):.4f}")
     print(f"\n{'='*70}")
-    print("LOOKBACK LENS — CROSS-DATASET AUROC MATRIX")
-    print(f"{'='*70}")
-    _lb_label = "Train \\ Eval"
-    header = f"{_lb_label:>14}"
-    for ds in available:
-        header += f"  {ds:>12}"
-    print(header)
-    print("-" * len(header))
-    for i, train_ds in enumerate(available):
-        row = f"{train_ds:>14}"
-        for j, eval_ds in enumerate(available):
-            marker = " *" if train_ds == eval_ds else "  "
-            row += f"  {auroc_matrix[i][j]:>10.4f}{marker}"
-        print(row)
-
-    diag     = np.diag(auroc_matrix)
-    off_diag = auroc_matrix[~np.eye(len(available), dtype=bool)]
-    print(f"\n  ID mean AUROC:  {np.mean(diag):.4f}")
-    print(f"  OOD mean AUROC: {np.mean(off_diag):.4f}")
-    print(f"  OOD/ID ratio:   {np.mean(off_diag)/np.mean(diag):.4f}")
-    print(f"\n  (* = in-distribution)")
-    print(f"{'='*70}")
 
 
 # ============================================================
@@ -665,36 +802,33 @@ def main():
     args = parse_args()
 
     if args.feature_type == "lookback":
-        # ---- Lookback Lens probe ----
         if args.mode == "id":
             if args.dataset is None:
-                logging.error("--dataset required for ID mode")
-                return
+                logging.error("--dataset required for ID mode"); return
             main_lookback_id(args.dataset)
         elif args.mode == "ood":
-            if args.train_dataset is None or args.eval_dataset is None:
-                logging.error("--train_dataset and --eval_dataset required for OOD mode")
-                return
+            if not (args.train_dataset and args.eval_dataset):
+                logging.error("--train_dataset and --eval_dataset required"); return
             main_lookback_ood(args.train_dataset, args.eval_dataset)
         elif args.mode == "matrix":
             main_lookback_matrix()
         return
 
-    # ---- Hidden-state (TBG / SLT) probe — original behaviour ----
+    # Hidden-state (TBG / SLT) probe
     if args.mode == "id":
         if args.dataset is None:
-            logging.error("--dataset required for ID mode")
-            return
-        main_id(args.dataset, save_probe=args.save_probe)
+            logging.error("--dataset required for ID mode"); return
+        main_id(args.dataset, strategy=args.strategy, top_k=args.top_k,
+                save_probe=args.save_probe)
 
     elif args.mode == "ood":
-        if args.train_dataset is None or args.eval_dataset is None:
-            logging.error("--train_dataset and --eval_dataset required for OOD mode")
-            return
-        main_ood(args.train_dataset, args.eval_dataset)
+        if not (args.train_dataset and args.eval_dataset):
+            logging.error("--train_dataset and --eval_dataset required"); return
+        main_ood(args.train_dataset, args.eval_dataset,
+                 strategy=args.strategy, top_k=args.top_k)
 
     elif args.mode == "matrix":
-        main_matrix()
+        main_matrix(top_k=args.top_k)
 
 
 if __name__ == "__main__":

@@ -17,8 +17,8 @@ import os
 from tqdm import tqdm
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from common_utils import (
-    NLI_MODEL, QA_DATASETS, OUTPUT_BASE,
-    CONDITION_ON_QUESTION, STRICT_ENTAILMENT,
+    NLI_MODEL, QA_DATASETS, ALL_DATASETS, RAGTRUTH_DATASETS,
+    OUTPUT_BASE, CONDITION_ON_QUESTION, STRICT_ENTAILMENT,
 )
 
 
@@ -27,8 +27,9 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 
 def parse_args():
     parser = argparse.ArgumentParser(description="NLI-based Semantic Entropy Labels")
-    parser.add_argument("--dataset", required=True, choices=QA_DATASETS,
-                        help="QA dataset name")
+    _nli_datasets = [d for d in ALL_DATASETS if d not in RAGTRUTH_DATASETS]
+    parser.add_argument("--dataset", required=True, choices=_nli_datasets,
+                        help="Dataset name (all except ragtruth, which uses map_ragtruth_labels.py)")
     parser.add_argument("--condition_on_question", action=argparse.BooleanOptionalAction,
                         default=CONDITION_ON_QUESTION,
                         help="Prepend question to generations for NLI")

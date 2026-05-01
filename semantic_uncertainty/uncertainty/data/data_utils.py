@@ -159,6 +159,37 @@ def load_ds(dataset_name, seed, add_options=None):
         train_dataset = [reformat_xsum(d) for d in dataset["train"]]
         validation_dataset = [reformat_xsum(d) for d in dataset["validation"]]
 
+    elif dataset_name == "ragtruth":
+        # RAGTruth — RAG hallucination benchmark with ground-truth labels.
+        # Stages 1+2 (generation + NLI) are handled by map_ragtruth_labels.py;
+        # this branch exists for reference and for any tooling that calls load_ds.
+        dataset = datasets.load_dataset("wandb/RAGTruth-processed")
+        md5hash = lambda s: str(int(hashlib.md5(s.encode('utf-8')).hexdigest(), 16))
+
+        def reformat_ragtruth(x):
+            labels = x.get('hallucination_labels_processed', {}) or {}
+            hallucinated = int(
+                labels.get('evident_conflict', 0) == 1 or
+                labels.get('baseless_info', 0) == 1
+            )
+            return {
+                'question':    x['query'],
+                'context':     x['context'],
+                'answers':     {'text': [x['output']]},
+                'id':          str(x.get('id', md5hash(x['query']))),
+                'hallucinated': hallucinated,
+                'input_str':   x.get('input_str', ''),
+            }
+
+        def is_llama2(x):
+            return 'llama-2-7b-chat' in str(x.get('model', '')).lower()
+
+        available_splits = list(dataset.keys())
+        train_split = 'train' if 'train' in available_splits else available_splits[0]
+        val_split   = 'test'  if 'test'  in available_splits else available_splits[-1]
+        train_dataset      = [reformat_ragtruth(d) for d in dataset[train_split] if is_llama2(d)]
+        validation_dataset = [reformat_ragtruth(d) for d in dataset[val_split]   if is_llama2(d)]
+
     elif dataset_name == "halueval_qa":
         # HaluEval QA — questions with a correct answer and supporting knowledge.
         # We use 'knowledge' as context and 'right_answer' as the reference answer.

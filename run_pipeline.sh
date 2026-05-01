@@ -26,6 +26,27 @@ fi
 LOG_DIR="output/logs"
 mkdir -p "$LOG_DIR"
 
+# ---- RAGTruth early-exit: stages 1+2 are handled by map_ragtruth_labels.py ----
+# If the only dataset requested is ragtruth, run the label mapper then jump
+# straight to stage 3.  If ragtruth is mixed with other datasets, the mapper
+# runs first and the other datasets proceed through the normal stages 1-2.
+RAGTRUTH_ONLY=false
+if [ "${DATASETS[*]}" = "ragtruth" ]; then
+    RAGTRUTH_ONLY=true
+fi
+
+if [[ " ${DATASETS[*]} " == *" ragtruth "* ]]; then
+    echo "[$(date)] RAGTruth: running label mapper (replaces stages 1+2)..."
+    $PYTHON map_ragtruth_labels.py 2>&1 | tee "$LOG_DIR/ragtruth_labels.log"
+    echo "[$(date)] RAGTruth label mapping done."
+fi
+
+# Remove ragtruth from the list for stages 1-2 (generation + NLI)
+NON_RAGTRUTH_DATASETS=()
+for ds in "${DATASETS[@]}"; do
+    [ "$ds" != "ragtruth" ] && NON_RAGTRUTH_DATASETS+=("$ds")
+done
+
 echo "=========================================="
 echo "SEP QA Pipeline"
 echo "=========================================="
@@ -34,26 +55,26 @@ echo "Python:     $PYTHON"
 echo "Start time: $(date)"
 echo "=========================================="
 
-# ---- Stage 1: Generation ----
+# ---- Stage 1: Generation (non-RAGTruth only) ----
 echo ""
 echo "=== STAGE 1: Generation ==="
-for ds in "${DATASETS[@]}"; do
+for ds in "${NON_RAGTRUTH_DATASETS[@]}"; do
     echo "[$(date)] Starting generation for $ds..."
     $PYTHON run_qa_generation.py --dataset "$ds" 2>&1 | tee "$LOG_DIR/gen_${ds}.log"
     echo "[$(date)] Finished generation for $ds."
     echo ""
 done
 
-# ---- Stage 2: NLI Labels ----
+# ---- Stage 2: NLI Labels (non-RAGTruth only) ----
 echo "=== STAGE 2: NLI Labels ==="
-for ds in "${DATASETS[@]}"; do
+for ds in "${NON_RAGTRUTH_DATASETS[@]}"; do
     echo "[$(date)] Starting NLI for $ds..."
     $PYTHON compute_nli_labels.py --dataset "$ds" 2>&1 | tee "$LOG_DIR/nli_${ds}.log"
     echo "[$(date)] Finished NLI for $ds."
     echo ""
 done
 
-# ---- Stage 3: Feature Extraction ----
+# ---- Stage 3: Feature Extraction (all datasets including ragtruth) ----
 echo "=== STAGE 3: Feature Extraction ==="
 for ds in "${DATASETS[@]}"; do
     echo "[$(date)] Extracting hidden-state features for $ds..."

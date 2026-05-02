@@ -12,9 +12,10 @@
 #   bash run_pipeline.sh squad trivia_qa
 set -e
 
-PYTHON=/home/jay_agarwal_2022/miniforge3/envs/se_probes/bin/python
-WORKDIR=/home/jay_agarwal_2022/SEP_Llama-3
-export HF_HUB_CACHE=/data/scratch/jay_agarwal_2022/hf_cache
+PYTHON=/home/gssc/.pyenv/shims/python
+WORKDIR=/home/gssc/yaawar/llm/SEP_Llama-3
+export HF_HUB_CACHE=~/.cache/huggingface/hub
+export HF_TOKEN="$HF_TOKEN"
 cd "$WORKDIR"
 
 # If specific datasets passed as args, use those; otherwise use all 4 QA datasets

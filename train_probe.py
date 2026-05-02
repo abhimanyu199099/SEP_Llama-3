@@ -654,7 +654,7 @@ def main_matrix(top_k=10):
             print(f"CROSS-DATASET {metric_name.upper()} MATRIX — {token_name}  (top_k={top_k})")
             print(f"{'='*70}")
             print(f"Model: {MODEL_NAME} | NLI: {NLI_MODEL}")
-            header = f"{'Train \\ Eval':>14}"
+            header = 'Train \\ Eval'.rjust(14)
             for ds in available:
                 header += f"  {ds:>12}"
             print(header)
@@ -776,7 +776,7 @@ def main_lookback_matrix():
         print(f"\n{'='*70}")
         print(f"LOOKBACK LENS — CROSS-DATASET {name} MATRIX")
         print(f"{'='*70}")
-        header = f"{'Train \\ Eval':>14}"
+        header = 'Train \\ Eval'.rjust(14)
         for ds in available:
             header += f"  {ds:>12}"
         print(header)

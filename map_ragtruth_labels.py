@@ -26,6 +26,7 @@ import argparse
 
 import torch
 import numpy as np
+from collections import Counter
 from tqdm import tqdm
 from datasets import load_dataset
 
@@ -127,11 +128,13 @@ def main():
 
         tbg_embedding = None
         slt_embedding = None
+        ml_answer = ""
 
         try:
-            # Forward pass at low temp — we discard the generated answer
-            # and keep only the TBG/SLT embeddings.
-            _, _, hidden_states, _ = model.predict(
+            # Low-temp forward pass: capture the model's own generated answer
+            # (used as most_likely_answer so causal validation compares model
+            # output vs gated output, not dataset output vs gated output).
+            ml_answer, _, hidden_states, _ = model.predict(
                 prompt,
                 temperature=TEMPERATURE_LOW,
                 return_latent=True,
@@ -140,8 +143,17 @@ def main():
         except Exception as e:
             logging.error(f"Sample {i}: embedding extraction failed — {e}")
 
-        # accuracy: 1.0 = non-hallucinated (correct), 0.0 = hallucinated
-        accuracy = float(1 - label)
+        # accuracy: compare model's low-temp answer against the reference output.
+        # Uses token-F1 >= 0.5 (same as inference_with_gate.py for QA).
+        def _tok_f1(pred, ref):
+            p, r = pred.lower().split(), ref.lower().split()
+            if not p or not r:
+                return 0.0
+            common = sum((Counter(p) & Counter(r)).values())
+            if common == 0:
+                return 0.0
+            return 2 * common / (len(p) + len(r))
+        accuracy = 1.0 if _tok_f1(ml_answer, output) >= 0.5 else 0.0
 
         data_store.append({
             "sample_index":      i,
@@ -151,8 +163,8 @@ def main():
             "context":           context if context else None,
             "answers":           [output],
             "prompt_used":       prompt,
-            "generations":       [output],   # single pre-existing response
-            "most_likely_answer": output,
+            "generations":       [output],   # pre-existing reference response
+            "most_likely_answer": ml_answer,
             "accuracy":          accuracy,
             "tbg_embedding":     tbg_embedding,
             "slt_embedding":     slt_embedding,

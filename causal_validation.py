@@ -88,12 +88,12 @@ class MonkeyPatchForcedController:
     without the softness of the sigmoid gate obscuring the result.
     """
 
-    def __init__(self, model, context_length, layer_range=None,
+    def __init__(self, model, context_span=(0, 0), layer_range=None,
                  mode='zero_all', lr_cutoff=0.5):
-        self.triggered      = False
-        self.context_length = context_length
-        self.mode           = mode
-        self.lr_cutoff      = lr_cutoff
+        self.triggered    = False
+        self.context_span = context_span  # (c_start, c_end) retrieved context token indices
+        self.mode         = mode
+        self.lr_cutoff    = lr_cutoff
         self._patched       = []   # list of (attn_mod, original_bound_method)
 
         layers = model.model.layers
@@ -201,11 +201,11 @@ class MonkeyPatchForcedController:
             # attn_output: (B=1, num_heads, q_len=1, head_dim)
 
             # ---- Forced gate ---- #
-            ctx      = controller.context_length
-            attn_row = attn_weights[0, :, -1, :]           # (H, kv_len)
-            attn_ctx = attn_row[:, :ctx].sum(-1)            # (H,)
-            attn_new = attn_row[:, ctx:].sum(-1)            # (H,)
-            lr       = attn_ctx / (attn_ctx + attn_new + 1e-10)  # (H,) ∈ [0,1]
+            c_start, c_end = controller.context_span
+            attn_row   = attn_weights[0, :, -1, :]                    # (H, kv_len)
+            attn_ctx   = attn_row[:, c_start:c_end].sum(-1)           # (H,)
+            attn_total = attn_row.sum(-1).clamp(min=1e-6)             # (H,)
+            lr         = attn_ctx / attn_total                         # (H,) ∈ [0,1]
 
             gate = torch.ones_like(lr)     # default: pass-through
 
@@ -217,7 +217,7 @@ class MonkeyPatchForcedController:
                 gate[lr < controller.lr_cutoff] = 0.0
             # ------------------- #
 
-            gate        = gate.to(attn_output.device).view(1, m.num_heads, 1, 1)
+            gate        = gate.to(device=attn_output.device, dtype=attn_output.dtype).view(1, m.num_heads, 1, 1)
             attn_output = attn_output * gate
 
             attn_output = attn_output.transpose(1, 2).contiguous()
@@ -272,13 +272,23 @@ def compute_f1(pred, gt):
 
 def generate_with_controller(raw_model, tokenizer, prompt,
                               controller, stop_seqs, max_new_tokens,
-                              existing_fallback):
+                              existing_fallback, context=None):
     inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
     if 'token_type_ids' in inputs:
         del inputs['token_type_ids']
 
     n_prompt = inputs['input_ids'].shape[1]
-    controller.context_length = n_prompt
+
+    # Compute context span: restrict LR numerator to retrieved context tokens only.
+    context_span = (0, n_prompt)  # fallback: full prompt
+    if context and context.strip():
+        ctx_pos = prompt.find(context)
+        if ctx_pos != -1:
+            prefix_ids  = tokenizer(prompt[:ctx_pos], add_special_tokens=False)['input_ids']
+            context_ids = tokenizer(context,          add_special_tokens=False)['input_ids']
+            context_span = (len(prefix_ids), len(prefix_ids) + len(context_ids))
+
+    controller.context_span = context_span
     controller.trigger()
 
     stopping_criteria = StoppingCriteriaList([StoppingCriteriaSub(
@@ -414,7 +424,7 @@ def main():
 
     logging.info("\n=== TEST 1: KNOCKOUT (zero all upper-layer heads) ===")
     knockout_ctrl = MonkeyPatchForcedController(
-        raw_model, context_length=0,
+        raw_model, context_span=(0, 0),
         layer_range=layer_range, mode='zero_all'
     )
 
@@ -424,10 +434,12 @@ def main():
         answers = item.get('answers', [])
         orig    = item['most_likely_answer']
         gated   = item['gated_answer']
+        context = item.get('context') or ''
 
         ko_ans = generate_with_controller(
             raw_model, tokenizer, prompt,
-            knockout_ctrl, stop_seqs, max_new_tokens, orig
+            knockout_ctrl, stop_seqs, max_new_tokens, orig,
+            context=context,
         )
         knock_results.append({
             'question':        item.get('question', ''),
@@ -450,7 +462,7 @@ def main():
 
     logging.info("\n=== TEST 2: BLINDNESS (zero high-LR grounding heads) ===")
     blindness_ctrl = MonkeyPatchForcedController(
-        raw_model, context_length=0,
+        raw_model, context_span=(0, 0),
         layer_range=layer_range, mode='zero_high', lr_cutoff=args.lr_cutoff
     )
 
@@ -459,10 +471,12 @@ def main():
         prompt  = item['prompt_used']
         answers = item.get('answers', [])
         orig    = item['most_likely_answer']
+        context = item.get('context') or ''
 
         blind_ans = generate_with_controller(
             raw_model, tokenizer, prompt,
-            blindness_ctrl, stop_seqs, max_new_tokens, orig
+            blindness_ctrl, stop_seqs, max_new_tokens, orig,
+            context=context,
         )
         blind_results.append({
             'question':         item.get('question', ''),
